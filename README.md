@@ -317,7 +317,7 @@ If you use Tandem, please cite:
 
 ```bibtex
 XXXXXXXXXXXXX
-}
+
 ```
 
 ## License
