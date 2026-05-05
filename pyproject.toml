@@ -1,0 +1,50 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tandem"
+version = "0.2.0"
+description = "Detection, mechanism classification, and population quantification of bacterial tandem gene duplications"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.8"
+authors = [
+    {name = "Wing Yui Ngan", email = "wyn24@cam.ac.uk"}
+]
+keywords = [
+    "bacterial genomics",
+    "tandem duplication",
+    "structural variation",
+    "homologous recombination",
+    "microhomology",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Bio-Informatics",
+]
+dependencies = [
+    "biopython>=1.79",
+    "numpy>=1.20",
+]
+
+[project.scripts]
+tandem = "tandem.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/PLACEHOLDER/tandem"
+Repository = "https://github.com/PLACEHOLDER/tandem"
+Issues = "https://github.com/PLACEHOLDER/tandem/issues"
+
+[tool.setuptools.packages.find]
+include = ["tandem*"]
