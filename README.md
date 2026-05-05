@@ -316,12 +316,7 @@ Module 1 runtimes are dominated by NUCmer self-alignment, which is largely singl
 If you use Tandem, please cite:
 
 ```bibtex
-@article{tandem2026,
-  author  = {Ngan, Wing Yui},
-  title   = {Tandem: a bioinformatics tool for detection, mechanism classification, and population quantification of bacterial tandem gene duplications},
-  journal = {Bioinformatics},
-  year    = {2026},
-  note    = {Manuscript submitted}
+XXXXXXXXXXXXX
 }
 ```
 
