@@ -267,7 +267,7 @@ tandem -r ref.fna -i isolate_R1.fq.gz -I isolate_R2.fq.gz \
        -iso -o step2_isolate/ -t 8
 # → inspect step2_isolate/coverage_plot.html
 
-# 2b. Re-run with chosen coordinates from the plot
+# 2b. Re-run with chosen coordinates from the plot; multiple candidate coordinates are accepted
 tandem -r ref.fna -i isolate_R1.fq.gz -I isolate_R2.fq.gz \
        -iso -s 1854000 -e 2866000 --precise -flank 400 \
        -o step2_isolate/ -t 8
