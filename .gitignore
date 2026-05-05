@@ -3,6 +3,25 @@ __pycache__/
 *.py[codz]
 *$py.class
 
+# Tandem-specific output and large data
+tandem_output/
+*_tandem_output/
+nucmer.delta
+nucmer.coords
+*.bam
+*.bam.bai
+*.fastq
+*.fastq.gz
+*.fq
+*.fq.gz
+*.fna
+*.fa
+*.fasta
+genome/
+benchmark_v0.2_logs/
+module*_v0.2_benchmark/
+breseq_comparison/
+
 # C extensions
 *.so
 
