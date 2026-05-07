@@ -638,8 +638,8 @@ def classify_single_copy_junction(ref_seq, start_0, end_0,
     microhomology_seq = upstream_flank[-microhomology_bp:] if microhomology_bp > 0 else ""
 
     # --- Step 2: HR detection ---
-    # Three scenarios test for direct repeats that could mediate HR.
-    # All three search for a homology block ≥ hr_min_consec bp at
+    # Four scenarios test for direct repeats that could mediate HR.
+    # All four search for a homology block ≥ hr_min_consec bp at
     # ≥ hr_min_identity identity.
     #
     # Scenario 3 (R-Y-R, primary): repeat OUTSIDE Y on both sides.
@@ -655,6 +655,16 @@ def classify_single_copy_junction(ref_seq, start_0, end_0,
     #   Windows: [start-small_in, start+in] vs [end-small_in, end+out]
     #   Geometry: the duplication boundary at the start is INTERNAL to a
     #   repeat, with the second repeat copy downstream of Y_end in reference.
+    #
+    # Scenario 4 (internal-internal): repeat INSIDE Y at both boundaries.
+    #   Windows: [start, start+in] vs [end-in, end]
+    #   Geometry: two homologous tracts (e.g. rRNA operons) sit at the
+    #   internal start and end of Y. HR between them via sister-chromatid
+    #   unequal crossing-over produces a tandem duplication of Y. This is
+    #   distinct from the immediate-junction microhomology measurement —
+    #   s4 looks for an EXTENDED repeat (≥ 35 bp at ≥ 92% identity) using
+    #   the same windowed-HSP analysis as the other scenarios. The two
+    #   windows must be disjoint, so inward is clamped to dup_length // 2.
     #
     # Adaptive outward extension: for large duplications (> 50kb), the
     # flanking R repeat may sit several kb outside the boundary (e.g.
@@ -680,10 +690,11 @@ def classify_single_copy_junction(ref_seq, start_0, end_0,
         else:
             adaptive_outward = hr_outward_ext
 
-        # Asymmetric windows for scenarios 1 and 2 use a smaller "into-other-side"
-        # extension to prevent body-vs-body false matches in large duplications.
-        # 200bp is enough to catch a partial repeat overlap at the inner boundary.
-        SMALL_IN = 200
+        # Each scenario uses strictly disjoint window halves to ensure
+        # mechanistically distinct geometries: s3 outside-outside, s1
+        # outside-inside, s2 inside-outside, s4 inside-inside. Module 2
+        # has already refined boundaries to the precise junction position,
+        # so no inside-extension tolerance on the "outside" side is needed.
 
         def _check_pair(seq_a, seq_b, label):
             """Run alignment + complexity filter. Returns (len, identity) or None."""
@@ -702,30 +713,40 @@ def classify_single_copy_junction(ref_seq, start_0, end_0,
                 return (wlen, wident, label)
             return None
 
-        # Scenario 3: R-Y-R (repeat OUTSIDE Y on both sides) — primary check
-        win_start_s3 = ref_seq[max(0, start_0 - adaptive_outward) :
-                                min(seq_len, start_0 + inward)]
-        win_end_s3 = ref_seq[max(0, end_0 - inward) :
-                              min(seq_len, end_0 + adaptive_outward)]
+        # Scenario 3: R-Y-R (repeat strictly OUTSIDE Y on both sides) — primary check
+        # Boundaries are taken at face value (Module 2 has already refined them).
+        # Strictly outside windows ensure s3 is mechanistically distinct from s4.
+        win_start_s3 = ref_seq[max(0, start_0 - adaptive_outward) : start_0]
+        win_end_s3 = ref_seq[end_0 : min(seq_len, end_0 + adaptive_outward)]
 
         # Scenario 1: R OUTSIDE start, INSIDE end
-        win_start_s1 = ref_seq[max(0, start_0 - adaptive_outward) :
-                                min(seq_len, start_0 + SMALL_IN)]
-        win_end_s1 = ref_seq[max(0, end_0 - inward) :
-                              min(seq_len, end_0 + SMALL_IN)]
+        # Outside-anchor side strictly outside; inside-anchor side inward.
+        win_start_s1 = ref_seq[max(0, start_0 - adaptive_outward) : start_0]
+        win_end_s1 = ref_seq[max(0, end_0 - inward) : end_0]
 
         # Scenario 2: R INSIDE start, OUTSIDE end
-        win_start_s2 = ref_seq[max(0, start_0 - SMALL_IN) :
-                                min(seq_len, start_0 + inward)]
-        win_end_s2 = ref_seq[max(0, end_0 - SMALL_IN) :
-                              min(seq_len, end_0 + adaptive_outward)]
+        # Inside-anchor side inward; outside-anchor side strictly outside.
+        win_start_s2 = ref_seq[start_0 : min(seq_len, start_0 + inward)]
+        win_end_s2 = ref_seq[end_0 : min(seq_len, end_0 + adaptive_outward)]
 
-        # Try all three scenarios; keep the longest valid match
+        # Scenario 4: R INSIDE Y at both boundaries
+        # Windows must be disjoint, so clamp inward to half the duplication length.
+        # We additionally cap at hr_max_inward (same default as other scenarios).
+        s4_inward = min(inward, max(0, dup_length // 2 - 1))
+        if s4_inward >= hr_min_consec:
+            win_start_s4 = ref_seq[start_0 : start_0 + s4_inward]
+            win_end_s4 = ref_seq[end_0 - s4_inward : end_0]
+        else:
+            win_start_s4 = ""
+            win_end_s4 = ""
+
+        # Try all four scenarios; keep the longest valid match
         results = []
         for seq_a, seq_b, label in [
             (win_start_s3, win_end_s3, f"single_copy_RYR_s3_w{inward}_ext{adaptive_outward}"),
             (win_start_s1, win_end_s1, f"single_copy_RYR_s1_w{inward}_ext{adaptive_outward}"),
             (win_start_s2, win_end_s2, f"single_copy_RYR_s2_w{inward}_ext{adaptive_outward}"),
+            (win_start_s4, win_end_s4, f"single_copy_RYR_s4_internal_w{s4_inward}"),
         ]:
             result = _check_pair(seq_a, seq_b, label)
             if result is not None:

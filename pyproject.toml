@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tandem"
-version = "0.2.0"
+version = "0.3.0"
 description = "Detection, mechanism classification, and population quantification of bacterial tandem gene duplications"
 readme = "README.md"
 license = {text = "MIT"}
@@ -42,9 +42,9 @@ dependencies = [
 tandem = "tandem.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/PLACEHOLDER/tandem"
-Repository = "https://github.com/PLACEHOLDER/tandem"
-Issues = "https://github.com/PLACEHOLDER/tandem/issues"
+Homepage = "https://github.com/Yuingan/Tandem"
+Repository = "https://github.com/Yuingan/Tandem"
+Issues = "https://github.com/Yuingan/Tandem/issues"
 
 [tool.setuptools.packages.find]
 include = ["tandem*"]
