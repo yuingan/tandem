@@ -1,29 +1,30 @@
 cff-version: 1.2.0
-title: "Tandem: a bioinformatics tool for detection, mechanism classification, and population quantification of bacterial tandem gene duplications"
-message: "If you use this software, please cite the accompanying manuscript."
-type: software
+message: "If you use this software, please cite it as below."
+title: "Tandem"
+abstract: "A bioinformatics tool for detection, mechanism classification, and population quantification of bacterial tandem gene duplications."
 authors:
   - given-names: "Wing Yui"
     family-names: "Ngan"
-    affiliation: "Department of Pharmacology, University of Cambridge, Cambridge, UK"
     email: "wyn24@cam.ac.uk"
-repository-code: "https://github.com/PLACEHOLDER/tandem"
-license: MIT
-version: "0.2.0"
-date-released: "2026-04-28"
+    affiliation: "Department of Pharmacology, University of Cambridge"
+version: "0.3.0"
+date-released: "2026-05-07"
+license: "MIT"
+repository-code: "https://github.com/Yuingan/Tandem"
+url: "https://github.com/Yuingan/Tandem"
 keywords:
-  - bacterial genomics
-  - tandem duplication
-  - structural variation
-  - homologous recombination
-  - microhomology
-  - bioinformatics
+  - "bacterial genomics"
+  - "tandem duplication"
+  - "structural variation"
+  - "homologous recombination"
+  - "microhomology"
+  - "experimental evolution"
 preferred-citation:
   type: article
+  title: "Tandem: a bioinformatics tool for detection, mechanism classification, and population quantification of bacterial tandem gene duplications"
   authors:
     - given-names: "Wing Yui"
       family-names: "Ngan"
-      affiliation: "Department of Pharmacology, University of Cambridge"
-  title: "Tandem: a bioinformatics tool for detection, mechanism classification, and population quantification of bacterial tandem gene duplications"
-  journal: "[journal]"
+  journal: "Bioinformatics"
   year: 2026
+  notes: "Manuscript submitted"
