@@ -10,8 +10,8 @@ authors:
 version: "0.3.0"
 date-released: "2026-05-07"
 license: "MIT"
-repository-code: "https://github.com/Yuingan/Tandem"
-url: "https://github.com/Yuingan/Tandem"
+repository-code: "https://github.com/yuingan/tandem"
+url: "https://github.com/yuingan/tandem"
 keywords:
   - "bacterial genomics"
   - "tandem duplication"
