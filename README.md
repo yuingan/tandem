@@ -321,7 +321,7 @@ If you use Tandem, please cite:
 ```bibtex
 @article{ngan2026tandem,
   title   = {Tandem: a bioinformatics tool for detection, mechanism classification, and population quantification of bacterial tandem gene duplications},
-  author  = {Ngan, Wing Y. and Smith, Ewan St. John},
+  author  = {Ngan, Wing Yui and Smith, Ewan St. John},
   journal = {bioRxiv},
   year    = {2026},
   doi     = {10.64898/2026.05.22.727201},
