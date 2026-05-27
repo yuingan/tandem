@@ -1,21 +1,27 @@
 cff-version: 1.2.0
-message: "If you use this software, please cite it as below."
+message: "If you use Tandem, please cite the preprint below."
 title: "Tandem"
 abstract: "A bioinformatics tool for detection, mechanism classification, and population quantification of bacterial tandem gene duplications."
+type: software
 authors:
-  - given-names: "Wing Yui"
-    family-names: "Ngan"
-    email: "wyn24@cam.ac.uk"
-    affiliation: "Department of Pharmacology, University of Cambridge"
-version: "0.3.0"
-date-released: "2026-05-07"
-license: "MIT"
+  - family-names: "Ngan"
+    given-names: "Wing Y."
+    orcid: "https://orcid.org/XXXX-XXXX-XXXX-XXXX"
+  - family-names: "Smith"
+    given-names: "Ewan St. John"
 repository-code: "https://github.com/yuingan/tandem"
-url: "https://github.com/yuingan/tandem"
-keywords:
-  - "bacterial genomics"
-  - "tandem duplication"
-  - "structural variation"
-  - "homologous recombination"
-  - "microhomology"
-  - "experimental evolution"
+license: MIT
+version: "0.2.0"
+preferred-citation:
+  type: article
+  title: "Tandem: a bioinformatics tool for detection, mechanism classification, and population quantification of bacterial tandem gene duplications"
+  authors:
+    - family-names: "Ngan"
+      given-names: "Wing Y."
+    - family-names: "Smith"
+      given-names: "Ewan St. John"
+  journal: "bioRxiv"
+  year: 2026
+  doi: "10.64898/2026.05.22.727201"
+  url: "https://doi.org/10.64898/2026.05.22.727201"
+  notes: "Preprint"
