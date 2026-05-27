@@ -5,8 +5,8 @@ abstract: "A bioinformatics tool for detection, mechanism classification, and po
 type: software
 authors:
   - family-names: "Ngan"
-    given-names: "Wing Y."
-    orcid: "https://orcid.org/XXXX-XXXX-XXXX-XXXX"
+    given-names: "Wing Yui"
+    orcid: "https://orcid.org/0000-0002-8722-8942"
   - family-names: "Smith"
     given-names: "Ewan St. John"
 repository-code: "https://github.com/yuingan/tandem"
@@ -17,7 +17,7 @@ preferred-citation:
   title: "Tandem: a bioinformatics tool for detection, mechanism classification, and population quantification of bacterial tandem gene duplications"
   authors:
     - family-names: "Ngan"
-      given-names: "Wing Y."
+      given-names: "Wing Yui"
     - family-names: "Smith"
       given-names: "Ewan St. John"
   journal: "bioRxiv"
