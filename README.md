@@ -311,13 +311,23 @@ Module 1 runtimes are dominated by NUCmer self-alignment, which is largely singl
 - Tandem requires the R-Y-R geometry to be satisfied on both sides of the duplicated region; one-sided flanking repeats will not produce an HR call even when one boundary clearly sits in a repeat.
 - Circular-genome wraparound is handled for distance metrics but not for HR detection windows at genome edges.
 
+
 ## Citation
 
 If you use Tandem, please cite:
 
-```bibtex
-XXXXXXXXXXXXX
+> Ngan WY, Smith ESJ. Tandem: a bioinformatics tool for detection, mechanism classification, and population quantification of bacterial tandem gene duplications. bioRxiv (2026). https://doi.org/10.64898/2026.05.22.727201
 
+```bibtex
+@article{ngan2026tandem,
+  title   = {Tandem: a bioinformatics tool for detection, mechanism classification, and population quantification of bacterial tandem gene duplications},
+  author  = {Ngan, Wing Y. and Smith, Ewan St. John},
+  journal = {bioRxiv},
+  year    = {2026},
+  doi     = {10.64898/2026.05.22.727201},
+  url     = {https://doi.org/10.64898/2026.05.22.727201},
+  note    = {Preprint}
+}
 ```
 
 ## License
