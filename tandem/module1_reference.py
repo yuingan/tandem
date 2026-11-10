@@ -93,8 +93,11 @@ def run_nucmer_self_alignment(ref_fasta, output_dir, threads=1,
     cmd = [
         "nucmer",
         "--maxmatch",
-        # required for self-alignment: without it the full-length diagonal
-        # shadows every repeat, since simplify drops contained clusters
+        # MUMmer's docs require this for self-alignment. Without it MUMmer 3
+        # drops every repeat as shadowed by the full-length diagonal. MUMmer 4
+        # keeps most of them only because its shadow check never looks at
+        # the first alignment, which is the diagonal; it still drops repeats
+        # shadowed by any other alignment.
         "--nosimplify",
         "-l", str(min_match),
         "-c", str(min_cluster),

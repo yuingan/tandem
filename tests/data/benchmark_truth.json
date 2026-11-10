@@ -1,0 +1,58 @@
+[
+  {
+    "size": 800,
+    "identity": 100.0,
+    "copies": 2,
+    "start": 117601,
+    "end": 119200
+  },
+  {
+    "size": 2000,
+    "identity": 100.0,
+    "copies": 2,
+    "start": 351201,
+    "end": 355200
+  },
+  {
+    "size": 5000,
+    "identity": 100.0,
+    "copies": 2,
+    "start": 588701,
+    "end": 598700
+  },
+  {
+    "size": 12000,
+    "identity": 99.8,
+    "copies": 2,
+    "start": 833101,
+    "end": 857100
+  },
+  {
+    "size": 30000,
+    "identity": 100.0,
+    "copies": 2,
+    "start": 1101901,
+    "end": 1161900
+  },
+  {
+    "size": 4000,
+    "identity": 100.0,
+    "copies": 3,
+    "start": 1421701,
+    "end": 1433700
+  },
+  {
+    "size": 3000,
+    "identity": 97.0,
+    "copies": 2,
+    "start": 1575001,
+    "end": 1581000
+  },
+  {
+    "size": 6000,
+    "identity": 92.0,
+    "copies": 2,
+    "start": 1631001,
+    "end": 1643000
+  }
+]

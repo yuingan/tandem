@@ -478,6 +478,7 @@ def main(argv=None):
                 output_dir=args.output,
                 min_anchor=args.min_anchor,
                 min_support=args.min_support,
+                min_size=args.min_size,
             )
             module_name = "module2"
         else:

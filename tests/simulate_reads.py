@@ -75,6 +75,9 @@ def main():
     ap.add_argument("--error", type=float, default=0.001)
     ap.add_argument("--seed", type=int, default=7)
     ap.add_argument("--gzip", action="store_true")
+    ap.add_argument("--circular", action="store_true",
+                    help="let fragments run across the end of the sequence, "
+                         "as they do on a real circular chromosome")
     args = ap.parse_args()
     random.seed(args.seed)
 
@@ -94,7 +97,11 @@ def main():
 
     idx = 0
     for template, n in ((wild, n_wild), (mutant, n_mut)):
-        span = len(template) - args.insert
+        if args.circular:
+            span = len(template)
+            template = template + template[:args.insert]
+        else:
+            span = len(template) - args.insert
         if span <= 0 or n <= 0:
             continue
         for _ in range(n):

@@ -1,17 +1,25 @@
 #!/bin/bash
-# Test Tandem module 1 on all reference genomes found in genome/pop_ncbi_ref/
-# Run from the working directory containing genome/pop_ncbi_ref/
+# Run Tandem module 1 on every reference genome under genome/pop_ncbi_ref/
+# and summarise. Run from the folder that contains genome/pop_ncbi_ref/.
+#
+#   bash path/to/test_all_species.sh
+#
+# REF_DIR, OUT_BASE and THREADS can be set in the environment. OUT_BASE
+# defaults to a folder named after the installed Tandem version, so running a
+# new version never overwrites results from an older one.
 
 set -euo pipefail
 
-REF_DIR="genome/pop_ncbi_ref"
-OUT_BASE="test_module1_all_species"
-THREADS=8
+HERE=$(cd "$(dirname "$0")" && pwd)
+REF_DIR=${REF_DIR:-genome/pop_ncbi_ref}
+VERSION=$(python -c "import tandem; print(tandem.__version__)")
+OUT_BASE=${OUT_BASE:-test_module1_v$VERSION}
+THREADS=${THREADS:-8}
 
 mkdir -p "$OUT_BASE"
 
 # Optional human-readable names. Any species not listed here falls back to
-# its directory name. Add the 7th species' pretty label below if you want one.
+# its directory name.
 declare -A SPECIES=(
     ["ecoli_K12_MG1655"]="E. coli K-12 MG1655"
     ["abaumannii_ATCC17978"]="A. baumannii ATCC 17978"
@@ -38,15 +46,13 @@ if [ "${#SPECIES_LIST[@]}" -eq 0 ]; then
     exit 1
 fi
 
-# Helper: return the display name (pretty label, or directory name as fallback)
 disp() { echo "${SPECIES[$1]:-$1}"; }
 
 echo "============================================"
-echo "Tandem Module 1: Testing ${#SPECIES_LIST[@]} species"
+echo "Tandem $VERSION module 1: ${#SPECIES_LIST[@]} species -> $OUT_BASE/"
 echo "============================================"
 echo ""
 
-# Run each species
 for sp in "${SPECIES_LIST[@]}"; do
     REF="$REF_DIR/$sp/${sp}.fna"
     OUTDIR="$OUT_BASE/$sp"
@@ -60,45 +66,13 @@ for sp in "${SPECIES_LIST[@]}"; do
     echo ""
 done
 
-# Summary across all species
-echo ""
 echo "============================================"
-echo "Summary across all species"
+echo "Summary"
 echo "============================================"
-echo ""
-printf "%-30s %8s %8s %8s %8s %8s\n" "Species" "Tandems" "HR" "non-HR" "Flagged" "Circ"
-printf "%-30s %8s %8s %8s %8s %8s\n" "-------" "-------" "----" "------" "-------" "----"
-
-for sp in "${SPECIES_LIST[@]}"; do
-    TSV="$OUT_BASE/$sp/tandem_duplications.tsv"
-    if [ -f "$TSV" ]; then
-        total=$(tail -n +2 "$TSV" | wc -l)
-        hr=$(tail -n +2 "$TSV" | awk -F'\t' '$14=="True"' | wc -l)
-        nonhr=$((total - hr))
-        flagged=$(tail -n +2 "$TSV" | awk -F'\t' '$22!=""' | wc -l)
-        circular=$(tail -n +2 "$TSV" | awk -F'\t' '$8=="True"' | wc -l)
-        printf "%-30s %8d %8d %8d %8d %8d\n" "$(disp "$sp")" "$total" "$hr" "$nonhr" "$flagged" "$circular"
-    else
-        printf "%-30s %8s %8s %8s %8s %8s\n" "$(disp "$sp")" "N/A" "N/A" "N/A" "N/A" "N/A"
-    fi
-done
-
-echo ""
-echo "Microhomology distribution (non-HR, all species combined):"
-echo ""
-printf "%6s %8s\n" "MH(bp)" "Count"
-printf "%6s %8s\n" "------" "-----"
-
-# Combine all TSVs and count microhomology for non-HR
-for sp in "${SPECIES_LIST[@]}"; do
-    TSV="$OUT_BASE/$sp/tandem_duplications.tsv"
-    if [ -f "$TSV" ]; then
-        tail -n +2 "$TSV" | awk -F'\t' '$14=="False"'
-    fi
-done | awk -F'\t' '{print $18}' | sort -n | uniq -c | sort -rn | head -20 | while read count mh; do
-    printf "%6s %8s\n" "$mh" "$count"
-done
+python "$HERE/tests/compare_module1.py" "$OUT_BASE"
 
 echo ""
 echo "Results in: $OUT_BASE/"
 echo "HTML reports: $OUT_BASE/*/tandem_report.html"
+echo "Compare with an earlier run:"
+echo "  python $HERE/tests/compare_module1.py OLD_RUN $OUT_BASE"

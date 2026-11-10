@@ -15,6 +15,7 @@ A ratio, not a proportion: J/(J+R) is f/(1+f) and caps at 0.5.
 
 import gzip
 import logging
+import time
 
 import numpy as np
 
@@ -26,6 +27,8 @@ ANCHOR_K = 20        # k-mer length used to place a read on the reference
 STRIDE = 8           # spacing between anchors along a read
 MIN_ANCHOR = 25      # bases required either side of a junction
 MIN_SUPPORT = 2      # reads needed before a junction is reported
+MIN_SIZE = 200       # smaller "duplications" are mostly indels; same floor as module 1
+ORIGIN_SLOP = 1000   # see _vote
 CHUNK_READS = 100_000
 
 
@@ -54,8 +57,22 @@ def read_chunks(paths, chunk=CHUNK_READS):
         yield batch
 
 
-def _anchor_reads(reads, index, k, stride):
-    """Returns (read_id, offset in read, diagonal) per matched anchor."""
+def _rc_codes(codes, k):
+    """Reverse complement of packed k-mers (A=0 C=1 G=2 T=3, last base lowest)."""
+    rc = np.zeros_like(codes)
+    x = codes.copy()
+    for _ in range(k):
+        rc = (rc << 2) | (3 - (x & 3))
+        x >>= 2
+    return rc
+
+
+def _anchor_reads(reads, index, k, stride, contig_start, contig_end):
+    """Returns (read_id, offset in read, diagonal) per matched anchor.
+
+    Only anchors on [contig_start, contig_end) of the concatenated index are
+    kept, and positions come back in that contig's own coordinates.
+    """
     spacer = "N" * k
     concat = spacer.join(reads)
     starts = np.cumsum([0] + [len(r) + k for r in reads[:-1]])
@@ -66,13 +83,22 @@ def _anchor_reads(reads, index, k, stride):
 
     lo = np.searchsorted(index._codes, codes, side="left")
     hi = np.searchsorted(index._codes, codes, side="right")
-    # a repeated anchor tells us nothing about where the read sits
-    unique = (hi - lo) == 1
+    rc = _rc_codes(codes, k)
+    rc_hits = (np.searchsorted(index._codes, rc, side="right")
+               - np.searchsorted(index._codes, rc, side="left"))
+    # An anchor found anywhere else, on either strand, can't place the read.
+    # Checking only the forward strand let inverted repeats misplace reads.
+    unique = ((hi - lo) == 1) & (rc_hits == 0)
     if not unique.any():
         return (np.empty(0, np.int64),) * 3
 
     offsets = offsets[unique]
     ref_pos = index._offsets[lo[unique]]
+    on_contig = (ref_pos >= contig_start) & (ref_pos < contig_end)
+    offsets = offsets[on_contig]
+    ref_pos = ref_pos[on_contig] - contig_start
+    if not len(offsets):
+        return (np.empty(0, np.int64),) * 3
 
     read_id = np.searchsorted(starts, offsets, side="right") - 1
     in_read = offsets - starts[read_id]
@@ -111,10 +137,18 @@ def _exact_junction(read, ref, diag_left, diag_right, lo, hi):
 
 
 def scan(ref_seq, read_paths, k=ANCHOR_K, stride=STRIDE,
-         min_anchor=MIN_ANCHOR, min_support=MIN_SUPPORT, index=None):
-    """Junctions with support counts. Coordinates are 1-based inclusive."""
+         min_anchor=MIN_ANCHOR, min_support=MIN_SUPPORT, min_size=MIN_SIZE,
+         index=None, contig_start=0):
+    """Junctions with support counts. Coordinates are 1-based inclusive.
+
+    With a shared index over several contigs, contig_start is where ref_seq
+    begins in that index (KmerIndex._seq_offsets).
+    """
     if index is None:
         index = KmerIndex({"ref": ref_seq}, min_k=k)
+        contig_start = 0
+    k = index.k
+    contig_end = contig_start + len(ref_seq)
 
     votes = {}
     linear_diag = []
@@ -122,11 +156,17 @@ def scan(ref_seq, read_paths, k=ANCHOR_K, stride=STRIDE,
     depth_delta = np.zeros(len(ref_seq) + 2, dtype=np.int32)
 
     n_reads = 0
+    next_report = 1_000_000
+    started = time.time()
     for reads in read_chunks(read_paths):
         n_reads += len(reads)
+        if n_reads >= next_report:
+            logger.info(f"  {n_reads:,} reads scanned ({time.time() - started:.0f}s)")
+            next_report += 1_000_000
         for orientation in (0, 1):
             batch = reads if orientation == 0 else [reverse_complement(r) for r in reads]
-            read_id, in_read, diag = _anchor_reads(batch, index, k, stride)
+            read_id, in_read, diag = _anchor_reads(batch, index, k, stride,
+                                                   contig_start, contig_end)
             if len(read_id) == 0:
                 continue
 
@@ -152,7 +192,7 @@ def scan(ref_seq, read_paths, k=ANCHOR_K, stride=STRIDE,
                 lo = edges[i]
                 hi = edges[i + 1] if i + 1 < len(edges) else len(read_id)
                 _vote(votes, batch[read_id[lo]], ref_seq,
-                      diag[lo:hi], in_read[lo:hi], k, min_anchor)
+                      diag[lo:hi], in_read[lo:hi], k, min_anchor, min_size)
 
     logger.info(f"  Scanned {n_reads:,} reads, {len(votes)} candidate junction(s)")
 
@@ -179,7 +219,7 @@ def scan(ref_seq, read_paths, k=ANCHOR_K, stride=STRIDE,
     return results
 
 
-def _vote(votes, read, ref_seq, diags, in_read, k, min_anchor):
+def _vote(votes, read, ref_seq, diags, in_read, k, min_anchor, min_size):
     """Record where one read puts the junction."""
     # second diagonal behind the first = tandem; anything else is some other
     # rearrangement and not ours to call
@@ -199,6 +239,13 @@ def _vote(votes, read, ref_seq, diags, in_read, k, min_anchor):
     end0 = split + uniq[0] - 1     # last base of the unit, 0-based
     start0 = split + uniq[1]       # first base of the unit, 0-based
     if start0 >= end0:
+        return
+    # A read across the origin of a circular contig looks exactly like a
+    # duplication of the whole contig. The slop covers assemblies whose ends
+    # overlap by a few hundred bases.
+    if start0 <= ORIGIN_SLOP and end0 >= len(ref_seq) - 1 - ORIGIN_SLOP:
+        return
+    if end0 - start0 + 1 < min_size:
         return
 
     start0, end0, _ = left_align(start0, end0, ref_seq)
