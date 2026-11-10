@@ -1,32 +1,12 @@
 """Command-line interface for Tandem.
 
-Usage:
-    tandem -r reference.fna                                    # Module 1: reference analysis
-    tandem -r reference.fna -i R1.fq -I R2.fq -iso            # Module 2: coverage plot (step 1)
-    tandem -r reference.fna -i R1.fq -I R2.fq -iso \\
-           -s 1847972 1848410 -e 2856714 2866983 \\
-           --precise -flank 400                                # Module 2: junction confirmation (step 2)
-    tandem -r reference.fna -i R1.fq -I R2.fq -pop -m meta.tsv # Module 3: population quantification
+    tandem -r ref.fna                                   reference genome (module 1)
+    tandem -r ref.fna -i R1.fq -I R2.fq -iso            find junctions in reads (module 2)
+    tandem -r ref.fna -i R1.fq -I R2.fq -pop -m meta.tsv  quantify known junctions (module 3)
 
-Module 2 workflow:
-    Step 1: Run with -iso (no -s/-e) to generate interactive coverage plot.
-    Step 2: Examine the HTML coverage plot to identify candidate boundaries.
-    Step 3: Re-run with -iso -s <starts> -e <ends> --precise -flank <flank>.
-
-Options:
-    -r          Reference genome FASTA (required)
-    -i          Forward reads FASTQ (modules 2 & 3)
-    -I          Reverse reads FASTQ (optional, paired-end)
-    -iso        Isolate mode (module 2)
-    -pop        Population mode (module 3)
-    -m          Metadata file for module 3 (Name, Start, End, [Sequence])
-    -s          Candidate start position(s), 1-based inclusive (module 2)
-    -e          Candidate end position(s), 1-based inclusive (module 2)
-    --precise   Exact position search (no window addition around -s/-e)
-    -flank      Flank size for junction generation (default: 200)
-    -t          Number of threads (default: 1)
-    -o          Output directory (default: tandem_output)
-    -v          Verbose output (-vv for debug)
+Module 2 finds junctions from the reads themselves. The older two-step
+workflow (coverage plot, then -s/-e by hand) is still available with
+--legacy-search.
 """
 
 import argparse
@@ -86,6 +66,19 @@ Examples:
     )
 
     # Mode flags
+    parser.add_argument(
+        "--legacy-search", action="store_true",
+        help="Use the old two-step workflow: coverage plot, then -s/-e by hand"
+    )
+    parser.add_argument(
+        "--min-anchor", type=int, default=25,
+        help="Bases required either side of a junction (default: 25). Applied "
+             "to the ancestral allele too, so both are counted the same way."
+    )
+    parser.add_argument(
+        "--min-support", type=int, default=2,
+        help="Reads crossing a junction before it is reported (default: 2)"
+    )
     parser.add_argument(
         "-iso", "--isolate", action="store_true",
         help="Isolate mode (Module 2): confirm duplication junctions in "
@@ -175,7 +168,30 @@ Examples:
     # Module 1 specific
     parser.add_argument(
         "-d", "--max-distance", type=int, default=30000,
-        help="Maximum distance between copies to consider tandem (default: 30000)"
+        help="Search radius for paired copies (default: 30000). Pairs further "
+             "apart than --max-tandem-gap go to dispersed_pairs.tsv."
+    )
+    parser.add_argument(
+        "--max-tandem-gap", type=int, default=100,
+        help="Largest gap between copies still counted as tandem (default: "
+             "100). Wider gaps are two dispersed copies of one repeat, with "
+             "no junction between them."
+    )
+    parser.add_argument(
+        "--keep-dispersed", action="store_true",
+        help="Keep dispersed repeat pairs in the main results table instead "
+             "of writing them to dispersed_pairs.tsv"
+    )
+    parser.add_argument(
+        "--diverged-below", type=float, default=99.0,
+        help="Copy identity below which a duplication is flagged as diverged "
+             "(default: 99.0). A flag, not a filter: below it the junction "
+             "describes the current substrate, not the formation event."
+    )
+    parser.add_argument(
+        "--repeat-family-loci", type=int, default=3,
+        help="Number of genomic loci at which a copy is treated as a repeat "
+             "family rather than a duplication (default: 3)"
     )
     parser.add_argument(
         "--min-identity", type=float, default=80.0,
@@ -403,7 +419,8 @@ def main(argv=None):
 
     # Check dependencies
     deps_needed = [2] if module_num == -1 else [module_num]
-    utils.check_dependencies(deps_needed)
+    scan_mode = module_num == 2 and args.start is None and not args.legacy_search
+    utils.check_dependencies(deps_needed, needs_mapper=not scan_mode)
 
     # Create output directory
     utils.ensure_dir(args.output)
@@ -444,28 +461,44 @@ def main(argv=None):
             hr_max_inward=args.hr_max_inward,
             hr_outward_ext=args.hr_outward_ext,
             hr_complexity_filter=not args.no_hr_complexity_filter,
+            max_tandem_gap=args.max_tandem_gap,
+            diverged_below=args.diverged_below,
+            repeat_family_min_loci=args.repeat_family_loci,
+            keep_dispersed=args.keep_dispersed,
         )
         module_name = "module1"
 
     elif module_num == 2:
-        from .module2_isolate import run_module2
-        # When --precise, junction search uses flank only (no window added)
-        junction_window = 0 if args.precise else args.window
-        results = run_module2(
-            ref_fasta=args.reference,
-            read1=args.read1,
-            read2=args.read2,
-            output_dir=args.output,
-            threads=args.threads,
-            window=args.window,
-            flank=args.flank,
-            junction_window=junction_window,
-            manual_start=args.start,
-            manual_end=args.end,
-            max_k=args.max_k,
-            hr_complexity_filter=not args.no_hr_complexity_filter,
-        )
-        module_name = "module2"
+        if args.start is None and not args.legacy_search:
+            from .module2_isolate import run_scan
+            results = run_scan(
+                ref_fasta=args.reference,
+                read1=args.read1,
+                read2=args.read2,
+                output_dir=args.output,
+                min_anchor=args.min_anchor,
+                min_support=args.min_support,
+            )
+            module_name = "module2"
+        else:
+            from .module2_isolate import run_module2
+            # When --precise, junction search uses flank only (no window added)
+            junction_window = 0 if args.precise else args.window
+            results = run_module2(
+                ref_fasta=args.reference,
+                read1=args.read1,
+                read2=args.read2,
+                output_dir=args.output,
+                threads=args.threads,
+                window=args.window,
+                flank=args.flank,
+                junction_window=junction_window,
+                manual_start=args.start,
+                manual_end=args.end,
+                max_k=args.max_k,
+                hr_complexity_filter=not args.no_hr_complexity_filter,
+            )
+            module_name = "module2"
 
     elif module_num == 3:
         from .module3_population import run_module3

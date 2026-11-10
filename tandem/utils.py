@@ -40,12 +40,8 @@ def check_dependency(name, test_cmd=None):
         return False
 
 
-def check_dependencies(modules_needed):
-    """Check all required external dependencies.
-
-    Args:
-        modules_needed: list of module numbers (1, 2, 3)
-    """
+def check_dependencies(modules_needed, needs_mapper=True):
+    """Check all required external dependencies."""
     missing = []
 
     # Module 1 needs NUCmer
@@ -54,7 +50,7 @@ def check_dependencies(modules_needed):
             missing.append("nucmer (MUMmer4): conda install -c bioconda mummer4")
 
     # Modules 2 and 3 need a read mapper and samtools
-    if 2 in modules_needed or 3 in modules_needed:
+    if needs_mapper and (2 in modules_needed or 3 in modules_needed):
         if not check_dependency("minimap2"):
             if not check_dependency("bwa"):
                 missing.append(
@@ -112,14 +108,6 @@ def decompress_if_gzipped(filepath, output_dir=None):
 
     NUCmer and some other tools cannot read .gz files directly.
     This creates an uncompressed copy in output_dir.
-
-    Args:
-        filepath: path to input file (may or may not be .gz)
-        output_dir: directory for decompressed file (default: same dir)
-
-    Returns:
-        (decompressed_path, needs_cleanup) tuple.
-        If file was not gzipped, returns (original_path, False).
     """
     import gzip
     import shutil
@@ -159,16 +147,7 @@ READ_EXTENSIONS = {
 
 
 def validate_file_extension(filepath, allowed_extensions, file_type="file"):
-    """Check if a file has a supported extension.
-
-    Args:
-        filepath: path to the file
-        allowed_extensions: set of allowed extensions (including dot)
-        file_type: description for error message
-
-    Returns:
-        True if valid, logs warning if not (does not block execution)
-    """
+    """Check if a file has a supported extension."""
     name = str(filepath).lower()
     for ext in sorted(allowed_extensions, key=len, reverse=True):
         if name.endswith(ext):
@@ -182,12 +161,7 @@ def validate_file_extension(filepath, allowed_extensions, file_type="file"):
 
 
 def write_fasta(records, output_path):
-    """Write sequences to FASTA file.
-
-    Args:
-        records: list of (seq_id, sequence) or (seq_id, sequence, description)
-        output_path: output file path
-    """
+    """Write sequences to FASTA file."""
     with open(output_path, "w") as f:
         for rec in records:
             if len(rec) == 3:
@@ -208,17 +182,7 @@ def reverse_complement(seq):
 
 
 def run_command(cmd, description="", check=True, capture=True):
-    """Run a shell command with logging.
-
-    Args:
-        cmd: command as list of strings or single string
-        description: human-readable description for logging
-        check: raise on non-zero exit
-        capture: capture stdout/stderr
-
-    Returns:
-        subprocess.CompletedProcess
-    """
+    """Run a shell command with logging."""
     if isinstance(cmd, str):
         cmd_str = cmd
         shell = True
@@ -248,18 +212,7 @@ def run_command(cmd, description="", check=True, capture=True):
 
 
 def parallel_map(func, items, threads=1, use_processes=False, desc=""):
-    """Apply func to items in parallel.
-
-    Args:
-        func: callable taking one argument
-        items: iterable of arguments
-        threads: number of parallel workers
-        use_processes: use ProcessPoolExecutor instead of ThreadPoolExecutor
-        desc: description for logging
-
-    Returns:
-        list of results in order
-    """
+    """Apply func to items in parallel."""
     items = list(items)
     if not items:
         return []
@@ -310,11 +263,6 @@ def parse_metadata(metadata_path):
         M1_F1    1000    2000
     Internally this becomes start=999, end=2000 so that seq[999:2000]
     gives the duplicated region.
-
-    Returns:
-        list of dicts with keys: name, start (0-based), end (1-based
-        inclusive = Python exclusive), sequence (or None),
-        user_start_1based, user_end_1based (original values for display)
     """
     entries = []
     counter = 0

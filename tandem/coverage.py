@@ -75,11 +75,7 @@ def detect_elevated_regions(coverage_array, window_size=200,
                             min_fold_change=1.7, min_region_size=500,
                             merge_fold_threshold=1.3,
                             merge_distance=3000):
-    """Detect regions with elevated coverage using threshold approach.
-
-    Returns:
-        (list of region dicts, genome_median)
-    """
+    """Detect regions with elevated coverage using threshold approach."""
     windowed, starts = sliding_window_coverage(coverage_array, window_size)
 
     genome_median = float(np.median(windowed))

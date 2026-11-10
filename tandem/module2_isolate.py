@@ -42,25 +42,6 @@ def run_module2(ref_fasta, read1, read2=None, output_dir=".",
       3. If no -s/-e: generate interactive coverage plot and exit.
          User examines the plot to identify candidate duplication
          boundaries, then re-runs with -s/-e.
-
-    Args:
-        ref_fasta: path to reference FASTA
-        read1: path to forward reads
-        read2: path to reverse reads (optional)
-        output_dir: output directory
-        threads: number of threads
-        window: sliding window size for coverage calculation
-        flank: flank size for junction candidate generation
-        junction_window: search window around each coordinate.
-            If 0 (--precise), search exact position only.
-            If None, defaults to `window`.
-        manual_start: list of candidate start positions (0-based internal)
-        manual_end: list of candidate end positions (0-based internal)
-        max_k: maximum junction extension length
-        hr_complexity_filter: reject HR calls from low-complexity windows
-
-    Returns:
-        list of confirmed junction dicts
     """
     logger.info("=" * 60)
     logger.info("Module 2: Isolate junction confirmation")
@@ -81,14 +62,14 @@ def run_module2(ref_fasta, read1, read2=None, output_dir=".",
     logger.info("Building k-mer index...")
     kmer_index = KmerIndex(sequences)
 
-    # Step 1: Map reads to reference and calculate coverage
-    logger.info("Step 1: Mapping reads to reference")
+    # Map reads to reference and calculate coverage
+    logger.info("Mapping reads to reference")
     bam_path = os.path.join(output_dir, "reads_to_ref.sorted.bam")
     alignment.map_reads_to_reference(
         ref_fasta, read1, read2, output_bam=bam_path, threads=threads
     )
 
-    logger.info("Step 2: Calculating coverage")
+    logger.info("Calculating coverage")
     all_coverage = {}
     all_medians = {}
     for seq_id in sequences:
@@ -174,8 +155,8 @@ def run_module2(ref_fasta, read1, read2=None, output_dir=".",
             genome_median=genome_median,
             elevated_regions=regions,
         )
-    # Step 3-5: Generate and confirm junction candidates
-    logger.info("Step 3: Generating junction candidates from boundary pairs")
+    # Generate and confirm junction candidates
+    logger.info("Generating junction candidates from boundary pairs")
     all_confirmed = []
 
     ref_seq = sequences[target_seq_id]
@@ -246,9 +227,6 @@ def _process_candidates(candidates, ref_seq, seq_id, kmer_index,
 
     grep gives accurate counts with no multi-mapping confusion because
     each junction is a unique sequence — a read either contains it or not.
-
-    Returns:
-        list of confirmed junction dicts
     """
     if not candidates:
         logger.info("    No valid junction candidates found")
@@ -383,10 +361,10 @@ def _process_candidates(candidates, ref_seq, seq_id, kmer_index,
             "total_reads": count,
             "hq_reads": count,
             "spanning_reads": count,
-            "is_hr_signature": classification["is_hr_signature"],
-            "hr_match_len": classification["hr_match_len"],
-            "hr_identity": classification["hr_identity"],
-            "hr_scenario": classification["hr_scenario"],
+            "flanking_repeat": classification["flanking_repeat"],
+            "repeat_len": classification["repeat_len"],
+            "repeat_identity": classification["repeat_identity"],
+            "repeat_geometry": classification["repeat_geometry"],
             "microhomology_bp": classification["microhomology_bp"],
             "microhomology_seq": classification["microhomology_seq"],
         }
@@ -398,7 +376,7 @@ def _process_candidates(candidates, ref_seq, seq_id, kmer_index,
 
     # Log confirmed junctions
     for hit in confirmed:
-        hr = hit.get("is_hr_signature", False)
+        hr = hit.get("flanking_repeat", False)
         mh = hit.get("microhomology_bp", 0)
         logger.info(
             f"    CONFIRMED: {hit['seq_id']}:{hit['dup_start']:,}-{hit['dup_end']:,} "
@@ -413,20 +391,7 @@ def _process_candidates(candidates, ref_seq, seq_id, kmer_index,
 def _filter_confirmed_junctions(candidates, read_counts, ref_seq, seq_id,
                                  kmer_index, min_spanning=1,
                                  hr_complexity_filter=True):
-    """Filter junction candidates by read support and classify.
-
-    Args:
-        candidates: list of junction candidate dicts
-        read_counts: dict from count_junction_reads
-        ref_seq: reference sequence
-        seq_id: sequence ID
-        kmer_index: KmerIndex object
-        min_spanning: minimum spanning reads to confirm
-        hr_complexity_filter: if True, reject HR from low-complexity windows
-
-    Returns:
-        list of confirmed junction dicts with HR + microhomology classification
-    """
+    """Filter junction candidates by read support and classify."""
     confirmed = []
 
     for cand in candidates:
@@ -462,16 +427,16 @@ def _filter_confirmed_junctions(candidates, read_counts, ref_seq, seq_id,
             "hq_reads": hq,
             "spanning_reads": spanning,
             "_screen_spanning": spanning,  # pass 1 count for comparison
-            "is_hr_signature": classification["is_hr_signature"],
-            "hr_match_len": classification["hr_match_len"],
-            "hr_identity": classification["hr_identity"],
-            "hr_scenario": classification["hr_scenario"],
+            "flanking_repeat": classification["flanking_repeat"],
+            "repeat_len": classification["repeat_len"],
+            "repeat_identity": classification["repeat_identity"],
+            "repeat_geometry": classification["repeat_geometry"],
             "microhomology_bp": classification["microhomology_bp"],
             "microhomology_seq": classification["microhomology_seq"],
         }
 
         confirmed.append(result)
-        hr_label = "HR" if classification["is_hr_signature"] else f"MH={classification['microhomology_bp']}bp"
+        hr_label = "HR" if classification["flanking_repeat"] else f"MH={classification['microhomology_bp']}bp"
         logger.debug(
             f"    Screen hit: {seq_id}:{display_start:,}-{display_end:,} "
             f"({cand['end']-cand['start']:,} bp) "
@@ -516,7 +481,7 @@ def _save_results(confirmed, output_dir):
             f.write("# Metadata for Tandem module 3 (-pop)\n")
             f.write("# Name\tStart\tEnd\tSequence\n")
             for junc in confirmed:
-                hr = junc.get("is_hr_signature", False)
+                hr = junc.get("flanking_repeat", False)
                 mh = junc.get("microhomology_bp", 0)
                 mech = "HR" if hr else f"MH{mh}bp"
                 name = f"{mech}_{junc['dup_start']}_{junc['dup_end']}"
@@ -531,7 +496,7 @@ def _save_results(confirmed, output_dir):
         fasta_path = os.path.join(output_dir, "confirmed_junctions.fasta")
         with open(fasta_path, "w") as f:
             for junc in confirmed:
-                hr = junc.get("is_hr_signature", False)
+                hr = junc.get("flanking_repeat", False)
                 mh = junc.get("microhomology_bp", 0)
                 mech = "HR" if hr else f"MH{mh}bp"
                 k = junc.get("junction_k", 0)
@@ -547,3 +512,45 @@ def _save_results(confirmed, output_dir):
                 for i in range(0, len(seq), 80):
                     f.write(seq[i:i+80] + "\n")
         logger.info(f"  Confirmed junction FASTA saved to {fasta_path}")
+
+
+def run_scan(ref_fasta, read1, read2=None, output_dir=".",
+             min_anchor=25, min_support=2):
+    """Find junctions in the reads, no coordinates needed."""
+    import csv
+
+    from .junction_scan import scan
+    from .kmer_index import KmerIndex
+
+    os.makedirs(output_dir, exist_ok=True)
+    sequences, _ = utils.load_fasta(ref_fasta)
+
+    logger.info("Building reference index")
+    index = KmerIndex(sequences)
+
+    results = []
+    for seq_id, seq in sequences.items():
+        logger.info(f"Scanning reads against {seq_id}")
+        for hit in scan(seq, [read1, read2], min_anchor=min_anchor,
+                        min_support=min_support, index=index):
+            hit["seq_id"] = seq_id
+            results.append(hit)
+
+    results.sort(key=lambda r: -r["junction_reads"])
+
+    columns = ["seq_id", "start", "end", "size", "microhomology", "junction_reads",
+               "reference_reads", "dosage", "depth_dosage"]
+    path = os.path.join(output_dir, "junctions.tsv")
+    with open(path, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=columns, delimiter="\t",
+                                lineterminator="\n", extrasaction="ignore")
+        writer.writeheader()
+        writer.writerows(results)
+
+    for r in results:
+        logger.info(
+            f"  {r['seq_id']}:{r['start']:,}-{r['end']:,}  {r['size']:,}bp  "
+            f"junction={r['junction_reads']} reference={r['reference_reads']}  "
+            f"dosage={r['dosage']}  depth={r['depth_dosage']}"
+        )
+    return results

@@ -39,15 +39,7 @@ CONFIDENCE_BADGES = {
 
 def generate_report(results, module_name, output_dir, ref_name="",
                     extra_info=None):
-    """Generate an HTML report for Tandem results.
-
-    Args:
-        results: list of result dicts (from any module)
-        module_name: 'module1', 'module2', or 'module3'
-        output_dir: output directory
-        ref_name: reference genome name for display
-        extra_info: dict of additional metadata to display
-    """
+    """Generate an HTML report for Tandem results."""
     output_dir = Path(output_dir)
     report_path = output_dir / "tandem_report.html"
 
@@ -90,9 +82,9 @@ def _build_module1_table(results):
 
     rows = []
     for i, r in enumerate(results):
-        is_hr = r.get("is_hr_signature", False)
+        is_hr = r.get("flanking_repeat", False)
         mh_bp = r.get("microhomology_bp", 0)
-        hr_label = "HR" if is_hr else "non-HR"
+        hr_label = "flanking repeat" if is_hr else "no flanking repeat"
         color = MECHANISM_COLORS.get("HR" if is_hr else "NHEJ", "#999")
 
         row = f"""
@@ -124,7 +116,7 @@ def _build_module1_table(results):
                 <th>Size</th>
                 <th>Distance</th>
                 <th>Identity</th>
-                <th>HR Status</th>
+                <th>Flanking repeat</th>
                 <th>Microhomology</th>
             </tr>
         </thead>
@@ -143,9 +135,9 @@ def _build_module2_table(results):
 
     rows = []
     for i, r in enumerate(results):
-        is_hr = r.get("is_hr_signature", False)
+        is_hr = r.get("flanking_repeat", False)
         mh_bp = r.get("microhomology_bp", 0)
-        hr_label = "HR" if is_hr else "non-HR"
+        hr_label = "flanking repeat" if is_hr else "no flanking repeat"
         color = MECHANISM_COLORS.get("HR" if is_hr else "NHEJ", "#999")
 
         row = f"""
@@ -171,7 +163,7 @@ def _build_module2_table(results):
                 <th>Dup Start</th>
                 <th>Dup End</th>
                 <th>Size</th>
-                <th>HR Status</th>
+                <th>Flanking repeat</th>
                 <th>Microhomology</th>
                 <th>Spanning Reads</th>
                 <th>HQ Reads</th>
@@ -245,8 +237,8 @@ def _build_module1_details(results):
     """Build detail panels for module 1."""
     panels = []
     for i, r in enumerate(results):
-        is_hr = r.get("is_hr_signature", False)
-        hr_label = "HR" if is_hr else "non-HR"
+        is_hr = r.get("flanking_repeat", False)
+        hr_label = "flanking repeat" if is_hr else "no flanking repeat"
         color = MECHANISM_COLORS.get("HR" if is_hr else "NHEJ", "#999")
         mh_seq = r.get("microhomology_seq", "")
         mh_display = f'<span class="mh-highlight">{mh_seq}</span>' if mh_seq else "none"
@@ -256,15 +248,15 @@ def _build_module1_details(results):
             hr_info = f"""
                 <div class="detail-item">
                     <label>HR Match Length</label>
-                    <span>{r.get('hr_match_len', 0)} bp</span>
+                    <span>{r.get('repeat_len', 0)} bp</span>
                 </div>
                 <div class="detail-item">
                     <label>HR Identity</label>
-                    <span>{r.get('hr_identity', 0):.1%}</span>
+                    <span>{r.get('repeat_identity', 0):.1%}</span>
                 </div>
                 <div class="detail-item">
                     <label>HR Scenario</label>
-                    <span>{r.get('hr_scenario', '')}</span>
+                    <span>{r.get('repeat_geometry', '')}</span>
                 </div>"""
 
         panel = f"""
@@ -662,7 +654,7 @@ def _build_html_page(title, ref_name, table_html, detail_html,
 <body>
     <div class="header">
         <h1>Tandem</h1>
-        <div class="subtitle">Detection and classification of tandem duplication mechanisms</div>
+        <div class="subtitle">Tandem duplication detection and junction architecture</div>
     </div>
     <div class="nav-bar">
         <span class="{'active' if module_name == 'module1' else ''}">Reference</span>

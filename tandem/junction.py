@@ -62,70 +62,7 @@ EXTEND_MAX_K = 75           # default max extension (2*75=150bp fits Illumina 15
 # K-mer index for fast uniqueness checking
 # =============================================================================
 
-class KmerIndex:
-    """Index of k-mers in a reference genome for fast uniqueness checking."""
-
-    def __init__(self, sequences, min_k=EXTEND_START_K):
-        self.sequences = sequences
-        self.min_k = min_k
-        self._concat_seq = ""
-        self._seq_offsets = {}
-        offset = 0
-        for seq_id, seq in sequences.items():
-            self._seq_offsets[seq_id] = offset
-            self._concat_seq += seq + "N" * 100
-            offset += len(seq) + 100
-
-        logger.debug(
-            f"KmerIndex: {len(sequences)} sequences, "
-            f"{len(self._concat_seq):,} bp total"
-        )
-
-    def count_occurrences(self, query, max_count=None):
-        """Count exact occurrences in the reference (both strands).
-
-        Args:
-            query: DNA sequence string
-            max_count: stop counting after this many (for early exit)
-
-        Returns:
-            Number of exact occurrences (or max_count if reached early)
-        """
-        count = 0
-        start = 0
-        seq = self._concat_seq
-        q = query.upper()
-
-        while True:
-            pos = seq.find(q, start)
-            if pos == -1:
-                break
-            count += 1
-            if max_count is not None and count >= max_count:
-                return count
-            start = pos + 1
-
-        rc = reverse_complement(q)
-        if rc != q:
-            start = 0
-            while True:
-                pos = seq.find(rc, start)
-                if pos == -1:
-                    break
-                count += 1
-                if max_count is not None and count >= max_count:
-                    return count
-                start = pos + 1
-
-        return count
-
-    def is_unique(self, query):
-        """Check if query occurs at most once (stops after finding 2)."""
-        return self.count_occurrences(query, max_count=2) <= 1
-
-    def is_absent(self, query):
-        """Check if query has zero occurrences (stops after finding 1)."""
-        return self.count_occurrences(query, max_count=1) == 0
+from .kmer_index import KmerIndex  # noqa: F401  (re-exported)
 
 
 def reverse_complement(seq):
@@ -233,16 +170,6 @@ def _best_identity_window(target_aln, query_aln, min_window=35,
     This is the Option 2 (windowed identity / HSP-style) approach:
     it correctly detects diverged HR repeats where mismatches are scattered
     (breaking consecutive-match runs) but local identity remains high.
-
-    Args:
-        target_aln: aligned target string (may contain '-' gaps)
-        query_aln: aligned query string (may contain '-' gaps)
-        min_window: minimum window size to test (default 35)
-        min_identity: minimum identity threshold within the window
-
-    Returns:
-        (best_length, best_identity) — length and identity of the best
-        passing window. Returns (0, 0.0) if no window meets the threshold.
     """
     n = len(target_aln)
     if n < min_window:
@@ -384,7 +311,7 @@ def check_hr(genome_seq, c1s_0, c1e_0, c2s_0, c2e_0,
       copy 1): tolerance capped at MAX_BODY_TOLERANCE (200bp) regardless
       of --hr-outward-ext. Without this cap, large outward_ext would
       extend deep into body, and since body₁ ≡ body₂ in a tandem, the
-      aligner would match body-tail vs body-tail → false positive HR.
+      aligner would match body-tail vs body-tail -> false positive HR.
 
       INNER boundaries (c2s_0 for check 1b, c1e_0 for check 2a): extend
       ONLY inward into the copy, zero extension across the inner junction.
@@ -498,16 +425,6 @@ def check_hr(genome_seq, c1s_0, c1e_0, c2s_0, c2e_0,
 def find_microhomology(seq1, seq2, max_len=None):
     """Find maximum exact microhomology at junction.
     Checks if end of seq1 matches start of seq2.
-
-    Args:
-        seq1: upstream flank (end of copy1 region)
-        seq2: downstream flank (start of copy2 region)
-        max_len: maximum microhomology to check (default: full input length).
-                 Previously defaulted to 60, which silently returned 0 for
-                 true MH > 60bp because partial k-mer comparisons misalign.
-
-    Returns:
-        int: number of bp of microhomology
     """
     if max_len is None:
         max_check = min(len(seq1), len(seq2))
@@ -533,25 +450,9 @@ def classify_junction(genome_seq, c1s_0, c1e_0, c2s_0, c2e_0,
 
     Reports HR status and microhomology bp count.
     Does NOT bin into NHEJ/MMEJ/SSA categories.
-
-    Args:
-        genome_seq: contig sequence string
-        c1s_0: 0-based start of copy1
-        c1e_0: 0-based exclusive end of copy1
-        c2s_0: 0-based start of copy2
-        c2e_0: 0-based exclusive end of copy2
-        hr_min_consec: minimum consecutive match length for HR detection
-        hr_min_identity: minimum alignment identity for HR detection
-        hr_max_inward: cap for inward window extent
-        hr_outward_ext: bp to extend outward beyond copy boundary
-        hr_complexity_filter: if True, reject HR calls where both windows
-            are low-complexity (microsatellite periodicity). Default True.
-
-    Returns:
-        dict with classification details
     """
-    # Step 1: Check HR
-    is_hr, hr_match_len, hr_identity, hr_scenario = check_hr(
+    # Check HR
+    is_hr, repeat_len, repeat_identity, repeat_geometry = check_hr(
         genome_seq, c1s_0, c1e_0, c2s_0, c2e_0,
         min_consec=hr_min_consec,
         min_identity=hr_min_identity,
@@ -560,7 +461,7 @@ def classify_junction(genome_seq, c1s_0, c1e_0, c2s_0, c2e_0,
         complexity_filter=hr_complexity_filter,
     )
 
-    # Step 2: Measure microhomology at junction
+    # Measure microhomology at junction
     flank_size = min(JUNCTION_FLANK, c1e_0 - c1s_0)
     upstream_flank = genome_seq[max(0, c1e_0 - flank_size) : c1e_0]
     downstream_flank = genome_seq[c2s_0 : min(len(genome_seq), c2s_0 + flank_size)]
@@ -573,10 +474,10 @@ def classify_junction(genome_seq, c1s_0, c1e_0, c2s_0, c2e_0,
     junction_seq = genome_seq[c1e_0:c2s_0] if junction_gap > 0 else ""
 
     return {
-        "is_hr_signature": is_hr,
-        "hr_match_len": hr_match_len,
-        "hr_identity": round(hr_identity, 4),
-        "hr_scenario": hr_scenario,
+        "flanking_repeat": is_hr,
+        "repeat_len": repeat_len,
+        "repeat_identity": round(repeat_identity, 4),
+        "repeat_geometry": repeat_geometry,
         "microhomology_bp": microhomology_bp,
         "microhomology_seq": microhomology_seq,
         "junction_gap_bp": max(0, junction_gap),
@@ -611,23 +512,11 @@ def classify_single_copy_junction(ref_seq, start_0, end_0,
       direct repeats flank Y, consistent with HR-mediated duplication.
       classify_junction would project a virtual copy 2 into non-homologous
       downstream sequence.
-
-    Args:
-        ref_seq: reference sequence string
-        start_0: 0-based start of duplicated region
-        end_0: 0-based exclusive end of duplicated region
-        hr_min_consec: minimum window size for HR identity check
-        hr_min_identity: minimum identity for HR detection
-        hr_max_inward: cap for inward window extent
-        hr_outward_ext: outward extension for NUCmer boundary tolerance
-
-    Returns:
-        dict with same keys as classify_junction for API compatibility
     """
     dup_length = end_0 - start_0
     seq_len = len(ref_seq)
 
-    # --- Step 1: Microhomology at the biological junction ---
+    # Microhomology at the biological junction
     # Junction in the mutant: ...ref[end-k:end] | ref[start:start+k]...
     # MH = how many bases at end of Y match start of Y
     flank_size = min(JUNCTION_FLANK, dup_length)
@@ -637,7 +526,7 @@ def classify_single_copy_junction(ref_seq, start_0, end_0,
     microhomology_bp = find_microhomology(upstream_flank, downstream_flank)
     microhomology_seq = upstream_flank[-microhomology_bp:] if microhomology_bp > 0 else ""
 
-    # --- Step 2: HR detection ---
+    # HR detection
     # Four scenarios test for direct repeats that could mediate HR.
     # All four search for a homology block ≥ hr_min_consec bp at
     # ≥ hr_min_identity identity.
@@ -673,9 +562,9 @@ def classify_single_copy_junction(ref_seq, start_0, end_0,
     # for finding distant flanking repeats. Adaptive scaling: extend outward
     # up to 5kb for duplications ≥ 50kb.
     is_hr = False
-    hr_match_len = 0
-    hr_identity = 0.0
-    hr_scenario = "no_HR"
+    repeat_len = 0
+    repeat_identity = 0.0
+    repeat_geometry = "no_HR"
 
     if dup_length >= 2 * hr_min_consec:
         inward = min(dup_length // 2, hr_max_inward)
@@ -756,17 +645,17 @@ def classify_single_copy_junction(ref_seq, start_0, end_0,
             # Pick the longest match
             best = max(results, key=lambda r: r[0])
             is_hr = True
-            hr_match_len = best[0]
-            hr_identity = best[1]
-            hr_scenario = best[2]
+            repeat_len = best[0]
+            repeat_identity = best[1]
+            repeat_geometry = best[2]
     else:
-        hr_scenario = "too_small_for_HR_check"
+        repeat_geometry = "too_small_for_HR_check"
 
     return {
-        "is_hr_signature": is_hr,
-        "hr_match_len": hr_match_len,
-        "hr_identity": round(hr_identity, 4),
-        "hr_scenario": hr_scenario,
+        "flanking_repeat": is_hr,
+        "repeat_len": repeat_len,
+        "repeat_identity": round(repeat_identity, 4),
+        "repeat_geometry": repeat_geometry,
         "microhomology_bp": microhomology_bp,
         "microhomology_seq": microhomology_seq,
         "junction_gap_bp": 0,
@@ -843,10 +732,6 @@ def generate_all_junction_candidates(ref_seq, s_approx, e_approx,
 
     Tests every (start, end) position pair in the search range.
     Uses ProcessPoolExecutor for true multi-core parallelism.
-
-    Args:
-        coverage_array, genome_median: kept for API compatibility, ignored.
-        max_k: maximum half-length of junction probe (default 75 for Illumina).
     """
     import time
     from concurrent.futures import ProcessPoolExecutor, as_completed

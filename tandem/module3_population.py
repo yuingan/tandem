@@ -5,9 +5,9 @@ Uses exact substring matching (grep -F) to count reads containing the junction,
 then calculates Junction Read Ratio (JRR) proportional to duplication frequency.
 
 JRR interpretation:
-  JRR ≈ 0.0   → junction not present (no duplicated cells)
-  JRR ≈ 0.5   → ~50% of cells carry the duplication
-  JRR ≈ 1.0   → all cells carry the duplication
+  JRR ≈ 0.0   -> junction not present (no duplicated cells)
+  JRR ≈ 0.5   -> ~50% of cells carry the duplication
+  JRR ≈ 1.0   -> all cells carry the duplication
 
 The formula normalizes junction-spanning reads by the expected number of
 reads at 100% duplication, given the junction length and WT coverage:
@@ -46,13 +46,6 @@ def _calculate_mean_coverage(bam_path, sequences):
 
     Uses samtools depth on the sorted/indexed BAM file. Averages the
     depth across all positions in all sequences in the reference.
-
-    Args:
-        bam_path: path to sorted, indexed BAM file
-        sequences: dict of seq_id -> sequence string (to get genome length)
-
-    Returns:
-        mean coverage (float)
     """
     result = utils.run_command(
         ["samtools", "depth", "-a", str(bam_path)],
@@ -110,9 +103,6 @@ def _count_exact_matches(junction_seqs, read1, read2, output_dir):
 
     Uses grep -F (Aho-Corasick) for fast multi-pattern exact matching.
     Searches both forward and reverse-complement of each junction.
-
-    Returns:
-        dict of {junction_sequence: count}
     """
     t0 = time.time()
 
@@ -221,18 +211,6 @@ def run_module3(ref_fasta, read1, read2=None, metadata_path=None,
     Step 3: Count exact matches in reads (grep -F).
     Step 4: Pick top-hit junction per metadata entry.
     Step 5: Calculate WT coverage and JRR; classify HR vs non-HR.
-
-    Args:
-        ref_fasta: path to reference FASTA
-        read1: path to forward reads
-        read2: path to reverse reads (optional)
-        metadata_path: path to metadata TSV file (required)
-        output_dir: output directory
-        threads: number of threads (for WT mapping)
-        flank: ±flank bp search window around provided coordinates (default 25)
-
-    Returns:
-        list of junction quantification result dicts
     """
     logger.info("=" * 60)
     logger.info("Module 3: Population junction quantification")
@@ -263,16 +241,16 @@ def run_module3(ref_fasta, read1, read2=None, metadata_path=None,
     read_length = _detect_read_length(read1)
     logger.info(f"  Detected read length: {read_length}bp")
 
-    # Step 1: Parse metadata
-    logger.info(f"Step 1: Parsing metadata from {metadata_path}")
+    # Parse metadata
+    logger.info(f"Parsing metadata from {metadata_path}")
     entries = utils.parse_metadata(metadata_path)
 
     if not entries:
         logger.error("No valid entries in metadata file.")
         return []
 
-    # Step 2: Build junction candidates within flank window (parallelized)
-    logger.info(f"Step 2: Building junction candidates (flank=±{flank}bp)")
+    # Build junction candidates within flank window (parallelized)
+    logger.info(f"Building junction candidates (flank=±{flank}bp)")
 
     # Collect all (entry_name, s, e) combinations to test in parallel
     from concurrent.futures import ProcessPoolExecutor, as_completed
@@ -388,15 +366,15 @@ def run_module3(ref_fasta, read1, read2=None, metadata_path=None,
         _save_results([], failed_junctions, output_dir)
         return []
 
-    # Step 3: Count exact matches (grep -F)
-    logger.info(f"Step 3: Counting junction reads by exact match "
+    # Count exact matches (grep -F)
+    logger.info(f"Counting junction reads by exact match "
                 f"({len(seq_to_entries)} unique sequences)")
     read_counts = _count_exact_matches(
         list(seq_to_entries.keys()), read1, read2, output_dir
     )
 
-    # Step 4: Pick top-hit junction per entry
-    logger.info("Step 4: Selecting top-hit junction per entry")
+    # Pick top-hit junction per entry
+    logger.info("Selecting top-hit junction per entry")
     entry_to_best = {}
     for name, candidates in entry_to_candidates.items():
         best = None
@@ -408,11 +386,11 @@ def run_module3(ref_fasta, read1, read2=None, metadata_path=None,
                 best = (s, e, seq, k, count)
         entry_to_best[name] = best
 
-    # Step 5: Calculate WT mean coverage by mapping reads to reference
+    # Calculate WT mean coverage by mapping reads to reference
     # We use the whole-genome average coverage (from mapped reads) as
     # the baseline. This represents the "effective sequencing depth" —
     # only reads that belong to this genome are counted.
-    logger.info("Step 5: Calculating WT mean coverage (mapping reads to reference)")
+    logger.info("Calculating WT mean coverage (mapping reads to reference)")
     wt_bam = os.path.join(output_dir, "reads_to_wt.sorted.bam")
     # Use conservative thread count for mapping to avoid memory/pipe issues
     map_threads = min(threads, 16)
@@ -425,8 +403,8 @@ def run_module3(ref_fasta, read1, read2=None, metadata_path=None,
     wt_cov_genome = _calculate_mean_coverage(wt_bam, sequences)
     logger.info(f"  Mean WT coverage: {wt_cov_genome:.2f}x")
 
-    # Step 6: Calculate JRR and classify mechanism
-    logger.info("Step 6: Calculating JRR and classifying mechanism")
+    # Calculate JRR and classify mechanism
+    logger.info("Calculating JRR and classifying mechanism")
     results = []
     for name, best in entry_to_best.items():
         if best is None:
@@ -482,16 +460,16 @@ def run_module3(ref_fasta, read1, read2=None, metadata_path=None,
             "expected_reads_100pct": round(expected_at_100pct, 2),
             "read_length": read_length,
             JRR_UNIT: round(jrr, 4),
-            "is_hr_signature": classification["is_hr_signature"],
-            "hr_match_len": classification["hr_match_len"],
-            "hr_identity": classification["hr_identity"],
+            "flanking_repeat": classification["flanking_repeat"],
+            "repeat_len": classification["repeat_len"],
+            "repeat_identity": classification["repeat_identity"],
             "microhomology_bp": classification["microhomology_bp"],
             "microhomology_seq": classification["microhomology_seq"],
         }
 
         results.append(result)
 
-        mech = "HR" if classification["is_hr_signature"] else f"non-HR (MH={classification['microhomology_bp']}bp)"
+        mech = "HR" if classification["flanking_repeat"] else f"non-HR (MH={classification['microhomology_bp']}bp)"
         shift = ""
         if display_start != user_start_1based or display_end != user_end_1based:
             shift = (f", shifted ({display_start - user_start_1based:+d}, "

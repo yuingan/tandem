@@ -16,11 +16,7 @@ logger = logging.getLogger("tandem")
 
 
 def detect_mapper():
-    """Detect which read mapper is available.
-
-    Returns:
-        'minimap2' or 'bwa' or None
-    """
+    """Detect which read mapper is available."""
     if utils.check_dependency("minimap2"):
         return "minimap2"
     elif utils.check_dependency("bwa"):
@@ -31,19 +27,7 @@ def detect_mapper():
 
 def map_reads_to_reference(ref_fasta, read1, read2=None, output_bam=None,
                            threads=1, mapper=None):
-    """Map reads to a reference genome and produce sorted BAM.
-
-    Args:
-        ref_fasta: path to reference FASTA
-        read1: path to forward reads (FASTQ)
-        read2: path to reverse reads (FASTQ), or None for single-end
-        output_bam: output BAM path (default: derived from ref name)
-        threads: number of threads
-        mapper: 'minimap2' or 'bwa' (auto-detect if None)
-
-    Returns:
-        Path to sorted, indexed BAM file
-    """
+    """Map reads to a reference genome and produce sorted BAM."""
     if mapper is None:
         mapper = detect_mapper()
     if mapper is None:
@@ -76,7 +60,7 @@ def _map_minimap2(ref_fasta, read1, read2, output_bam, threads):
     large datasets on some systems. The unsorted BAM is deleted after
     sorting to save disk space.
     """
-    # Step 1: minimap2 writes unsorted BAM via samtools view (no sorting yet)
+    # minimap2 writes unsorted BAM via samtools view (no sorting yet)
     unsorted_bam = str(output_bam).replace('.sorted.bam', '.unsorted.bam')
     if unsorted_bam == str(output_bam):
         unsorted_bam = str(output_bam) + '.unsorted.bam'
@@ -87,7 +71,7 @@ def _map_minimap2(ref_fasta, read1, read2, output_bam, threads):
     else:
         cmd_map += [str(read1)]
 
-    # Pipe minimap2 → samtools view (convert SAM to BAM, no sorting)
+    # Pipe minimap2 -> samtools view (convert SAM to BAM, no sorting)
     # This is a very light pipe — samtools view just compresses the stream
     map_cmd_str = (
         f"{' '.join(str(c) for c in cmd_map)} | "
@@ -98,7 +82,7 @@ def _map_minimap2(ref_fasta, read1, read2, output_bam, threads):
         description="Mapping reads with minimap2 (writing unsorted BAM)"
     )
 
-    # Step 2: samtools sort with conservative memory to avoid OOM
+    # samtools sort with conservative memory to avoid OOM
     # Use -m to limit per-thread memory (default would be 768M × threads)
     # Using 512M × max 8 threads = max 4 GB total
     sort_threads = min(threads, 8)
@@ -148,16 +132,6 @@ def map_reads_to_junctions(junction_fasta, read1, read2=None,
 
     Uses more sensitive mapping parameters since we're looking for
     reads that span novel junctions.
-
-    Args:
-        junction_fasta: FASTA of junction reference sequences
-        read1: forward reads
-        read2: reverse reads (optional)
-        output_bam: output BAM path
-        threads: number of threads
-
-    Returns:
-        Path to sorted, indexed BAM file
     """
     if output_bam is None:
         output_bam = str(Path(junction_fasta).with_suffix(".reads.sorted.bam"))
@@ -211,14 +185,6 @@ def count_junction_reads(bam_path, min_mapq=0, min_overlap=10):
 
     This avoids the multi-mapping MAPQ problem when many similar
     junction candidates are pooled into one reference.
-
-    Args:
-        bam_path: path to BAM mapped against junction references
-        min_mapq: ignored (kept for API compatibility)
-        min_overlap: minimum bases mapped on each side of junction center
-
-    Returns:
-        dict of {junction_id: {'total_reads': N, 'hq_reads': N, 'spanning_reads': N}}
     """
     # Use samtools idxstats for total counts per reference
     result = utils.run_command(
@@ -322,17 +288,7 @@ def count_junction_reads(bam_path, min_mapq=0, min_overlap=10):
 
 
 def get_coverage_at_position(bam_path, seq_id, start, end):
-    """Get mean coverage at a specific genomic region.
-
-    Args:
-        bam_path: path to BAM file
-        seq_id: sequence/chromosome ID
-        start: start position (0-based)
-        end: end position
-
-    Returns:
-        float mean coverage
-    """
+    """Get mean coverage at a specific genomic region."""
     region = f"{seq_id}:{start+1}-{end}"  # samtools uses 1-based
     result = utils.run_command(
         ["samtools", "depth", "-a", "-r", region, str(bam_path)],
