@@ -6,8 +6,8 @@
 A run is one Module 1 output folder, or a folder of them (one per genome,
 matched by folder name between the two runs). Columns are read by name, so
 output from v0.3.0 works as well as from later versions. --detail lists the
-old calls that are now inverted pairs, multiples of a shorter repeat unit or
-gone, and the new tandems the old run never reported.
+old calls that are now inverted pairs, part of an array, or gone, and the new
+tandems the old run never reported.
 """
 
 import csv
@@ -47,8 +47,27 @@ def load(folder):
     _, pairs = read_tsv(os.path.join(folder, "dispersed_pairs.tsv"))
     _, inverted = read_tsv(os.path.join(folder, "inverted_pairs.tsv"))
     _, multiples = read_tsv(os.path.join(folder, "unit_multiples.tsv"))
+    _, short = read_tsv(os.path.join(folder, "short_unit_arrays.tsv"))
     return {"new_format": "architecture" in header, "calls": calls,
-            "pairs": pairs, "inverted": inverted, "multiples": multiples}
+            "pairs": pairs, "inverted": inverted, "multiples": multiples, "short": short}
+
+
+def arrays(run):
+    """Every array in a run: reported ones and those with a unit below the floor."""
+    return [r for r in run["calls"] if float(r.get("copy_number") or 2) > 2] + run["short"]
+
+
+def array_unit(row, rows):
+    """Unit of the array an old call lies inside, or None."""
+    for a in rows:
+        if a["seq_id"] != row["seq_id"]:
+            continue
+        unit = int(a["size"])
+        start = int(a["copy1_start"])
+        end = start + round(unit * float(a["copy_number"])) - 1
+        if start - unit // 2 <= int(row["copy1_start"]) and int(row["copy2_end"]) <= end + unit // 2:
+            return unit
+    return None
 
 
 def is_inverted(row):
@@ -82,13 +101,13 @@ def composition(run):
         row["diverged"] = sum(true(r.get("copies_diverged")) for r in calls)
         row["dispersed"] = len(run["pairs"])
         row["inverted"] = len(run["inverted"])
-        row["multiples"] = len(run["multiples"])
+        row["short"] = len(run["short"])
     else:
         row["flank"] = sum(has_flank(r) for r in calls)
         row["no_flank"] = len(calls) - row["flank"]
         # v0.3.0 kept dispersed and inverted pairs in the main table; count
         # the ones the current rules would set aside
-        row["array"] = row["diverged"] = row["multiples"] = None
+        row["array"] = row["diverged"] = row["short"] = None
         row["inverted"] = sum(is_inverted(r) for r in calls)
         row["dispersed"] = sum(int(r.get("distance", 0)) > 100 and not is_inverted(r)
                                for r in calls)
@@ -101,16 +120,17 @@ def fmt(value):
 
 def print_composition(runs):
     print(f"{'genome':<28} {'tandems':>8} {'flank rep':>10} {'no flank':>9} "
-          f"{'arrays':>7} {'diverged':>9} {'dispersed':>10} {'inverted':>9} {'multiples':>10}")
+          f"{'arrays':>7} {'diverged':>9} {'dispersed':>10} {'inverted':>9} {'short arrays':>13}")
     for name, run in runs.items():
         c = composition(run)
         print(f"{name:<28} {c['tandems']:>8} {c['flank']:>10} "
               f"{c['no_flank']:>9} {fmt(c['array']):>7} "
               f"{fmt(c['diverged']):>9} {fmt(c['dispersed']):>10} {fmt(c['inverted']):>9} "
-              f"{fmt(c['multiples']):>10}")
+              f"{fmt(c['short']):>13}")
     if any(not r["new_format"] for r in runs.values()):
         print("  (v0.3.0 output: 'dispersed' and 'inverted' count main-table calls: direct "
               "copies more than 100 bp apart, and reversed copies)")
+    print("  ('short arrays' have a unit below --min-size and are not counted as tandems)")
 
 
 def print_microhomology(runs):
@@ -126,10 +146,12 @@ def print_microhomology(runs):
 
 
 def fate(old, new):
-    """Sort old calls into kept / dispersed / inverted / multiple / gone, and
-    find new calls with no old match. Multiples come back as (old, new) pairs
-    so the unit can be shown."""
-    kept, moved, flipped, multiple, gone, matched = [], [], [], [], [], set()
+    """Sort old calls into kept / dispersed / inverted / in an array / gone,
+    and find new calls with no old match. An old call is in an array when it
+    matches a pair set aside as a multiple of an array's unit, or lies inside
+    an array; those come back as (old call, unit)."""
+    kept, moved, flipped, in_array, gone, matched = [], [], [], [], [], set()
+    new_arrays = arrays(new)
     for o in old["calls"]:
         hit = next((i for i, n in enumerate(new["calls"]) if same_place(o, n)), None)
         if hit is not None:
@@ -141,25 +163,26 @@ def fate(old, new):
             flipped.append(o)
         else:
             m = next((p for p in new["multiples"] if same_place(o, p)), None)
-            if m is not None:
-                multiple.append((o, m))
+            unit = m.get("unit") if m is not None else array_unit(o, new_arrays)
+            if unit is not None:
+                in_array.append((o, unit))
             else:
                 gone.append(o)
     fresh = [n for i, n in enumerate(new["calls"]) if i not in matched]
-    return kept, moved, flipped, multiple, gone, fresh
+    return kept, moved, flipped, in_array, gone, fresh
 
 
 def print_fate(old_runs, new_runs):
     print(f"{'genome':<28} {'old calls':>10} {'still tandem':>13} "
-          f"{'now dispersed':>14} {'now inverted':>13} {'now multiple':>13} {'gone':>6} "
+          f"{'now dispersed':>14} {'now inverted':>13} {'in an array':>12} {'gone':>6} "
           f"{'new tandems':>12} {'not in old':>11}")
     for name in sorted(set(old_runs) | set(new_runs)):
         if name not in old_runs or name not in new_runs:
             print(f"{name:<28} {'(only in one run)':>40}")
             continue
-        kept, moved, flipped, multiple, gone, fresh = fate(old_runs[name], new_runs[name])
+        kept, moved, flipped, in_array, gone, fresh = fate(old_runs[name], new_runs[name])
         print(f"{name:<28} {len(old_runs[name]['calls']):>10} {len(kept):>13} "
-              f"{len(moved):>14} {len(flipped):>13} {len(multiple):>13} {len(gone):>6} "
+              f"{len(moved):>14} {len(flipped):>13} {len(in_array):>12} {len(gone):>6} "
               f"{len(new_runs[name]['calls']):>12} {len(fresh):>11}")
 
 
@@ -181,24 +204,27 @@ def print_gaps(runs):
 
 def describe(row):
     gap = row.get("distance", "?")
+    size = f"{row.get('size', '?')}bp"
     extra = ""
     if "architecture" in row:
         extra = f"  {row['architecture']}  loci={row.get('repeat_loci', '?')}"
+        if row["architecture"] == "array":
+            size += f" x{row.get('copy_number', '?')}"
     return (f"{row['seq_id']}:{int(row['copy1_start']):,}-{int(row['copy1_end']):,} / "
             f"{int(row['copy2_start']):,}-{int(row['copy2_end']):,}  "
-            f"{row.get('size', '?')}bp  {row.get('identity', '?')}%  gap {gap}{extra}")
+            f"{size}  {row.get('identity', '?')}%  gap {gap}{extra}")
 
 
 def print_detail(old_runs, new_runs):
     for name in sorted(set(old_runs) & set(new_runs)):
-        _, _, flipped, multiple, gone, fresh = fate(old_runs[name], new_runs[name])
-        if not flipped and not multiple and not gone and not fresh:
+        _, _, flipped, in_array, gone, fresh = fate(old_runs[name], new_runs[name])
+        if not flipped and not in_array and not gone and not fresh:
             continue
         print(name)
         for row in flipped:
             print(f"  inverted  {describe(row)}")
-        for row, m in multiple:
-            print(f"  multiple  {describe(row)}  ({m.get('unit', '?')} bp unit)")
+        for row, unit in in_array:
+            print(f"  in array  {describe(row)}  ({unit} bp unit)")
         for row in gone:
             print(f"  gone      {describe(row)}")
         for row in fresh:

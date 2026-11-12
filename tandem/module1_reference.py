@@ -543,22 +543,27 @@ def identify_tandem_duplications(alignments, seq_lengths, max_distance=50000,
     tandems, n_twice = _drop_same_pair(tandems)
     n_multiples = _mark_unit_multiples(tandems, regions)
 
-    n_arrays = 0
+    # Arrays whose unit is below the size floor aren't duplications to report,
+    # but they are listed so they can be counted.
+    n_arrays = n_short = 0
     for r in regions:
-        if r["unit"] < min_size:
-            continue
         if apply_short_dup_filters and r["unit"] < short_dup_threshold and sequences is not None:
             ref = sequences.get(r["seq_id"], "")
             if ref and not _sequence_complexity_ok(ref[r["start"] - 1:r["start"] - 1 + r["unit"]]):
                 n_filtered_by_complexity += 1
                 continue
-        tandems.append(_array_call(r))
-        n_arrays += 1
+        call = _array_call(r)
+        if r["unit"] < min_size:
+            call["structure"] = "short_unit_array"
+            n_short += 1
+        else:
+            n_arrays += 1
+        tandems.append(call)
 
     if n_twice:
         logger.info(f"  {n_twice} call(s) dropped as the same pair aligned twice")
-    if n_arrays:
-        logger.info(f"  {n_arrays} tandem array(s)")
+    if n_arrays or n_short:
+        logger.info(f"  {n_arrays} tandem array(s), and {n_short} with a unit below {min_size}bp")
     if n_multiples:
         logger.info(f"  {n_multiples} call(s) are whole multiples of an array's unit")
 
@@ -582,7 +587,8 @@ def identify_tandem_duplications(alignments, seq_lengths, max_distance=50000,
         f"  {n['tandem']} tandem duplication candidate(s), "
         f"{n['dispersed_pair']} dispersed repeat pair(s) (gap > {max_tandem_gap}bp), "
         f"{n['inverted_pair']} inverted pair(s), "
-        f"{n['unit_multiple']} multiple(s) of a shorter unit"
+        f"{n['unit_multiple']} multiple(s) of a shorter unit, "
+        f"{n['short_unit_array']} array(s) with a unit below {min_size}bp"
     )
     return tandems
 
@@ -1190,9 +1196,11 @@ def run_module1(ref_fasta, output_dir, threads=1, max_distance=50000,
     dispersed = [t for t in tandems if t.get("structure") == "dispersed_pair"]
     inverted = [t for t in tandems if t.get("structure") == "inverted_pair"]
     multiples = [t for t in tandems if t.get("structure") == "unit_multiple"]
+    short_arrays = [t for t in tandems if t.get("structure") == "short_unit_array"]
     _save_pairs(dispersed, output_dir, "dispersed_pairs.tsv")
     _save_pairs(inverted, output_dir, "inverted_pairs.tsv")
     _save_pairs(multiples, output_dir, "unit_multiples.tsv", extra=("unit",))
+    _save_pairs(short_arrays, output_dir, "short_unit_arrays.tsv", extra=("copy_number",))
     if dispersed and not keep_dispersed:
         logger.info(
             f"  {len(dispersed)} dispersed pair(s) written to "
@@ -1202,6 +1210,9 @@ def run_module1(ref_fasta, output_dir, threads=1, max_distance=50000,
         logger.info(f"  {len(inverted)} inverted pair(s) written to inverted_pairs.tsv")
     if multiples:
         logger.info(f"  {len(multiples)} multiple(s) of a shorter unit written to unit_multiples.tsv")
+    if short_arrays:
+        logger.info(f"  {len(short_arrays)} array(s) with a unit below {min_size}bp written "
+                    f"to short_unit_arrays.tsv")
 
     keep = {"tandem", None}
     if keep_dispersed:
@@ -1254,7 +1265,8 @@ def _save_pairs(pairs, output_dir, name, extra=()):
 
     Direct copies too far apart are the substrate an unequal exchange acts
     on; inverted copies are what an inversion needs. Neither is a duplication,
-    and nor is a multiple of a shorter unit inside an array.
+    and nor is a multiple of a shorter unit inside an array. Arrays whose unit
+    is below the size floor go through here too.
     """
     path = os.path.join(output_dir, name)
     header = [

@@ -41,10 +41,14 @@ def main():
             aln(2304390, 2304841, 2304616, 2305067),
             aln(2304390, 2304728, 2304729, 2305067)]
     found = calls(rows)
+    short = [c for c in found if c["structure"] == "short_unit_array"]
     multiples = [c for c in found if c["structure"] == "unit_multiple"]
-    ok = len(found) == len(multiples) >= 1 and all(c["unit"] == 113 for c in multiples)
-    results.append(("multiples of a 113 bp unit, --min-size 200", ok,
-                    f"{len(multiples)} of {len(found)} set aside as multiples"))
+    ok = (len(short) == 1 and short[0]["size"] == 113 and short[0]["copy_number"] == 6
+          and len(multiples) >= 1 and all(c["unit"] == 113 for c in multiples)
+          and len(found) == len(short) + len(multiples))
+    detail = (f"short array {short[0]['size']} bp x{short[0]['copy_number']}, "
+              f"{len(multiples)} multiple(s)" if len(short) == 1 else f"{len(short)} short arrays")
+    results.append(("multiples of a 113 bp unit, --min-size 200", ok, detail))
     found = calls(rows, min_size=100)
     kept = [c for c in found if c["structure"] == "tandem"]
     ok = (len(kept) == 1 and kept[0]["size"] == 113 and kept[0]["copy_number"] == 6

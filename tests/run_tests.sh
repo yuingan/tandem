@@ -26,8 +26,9 @@ for g in tandem_2x tandem_3x is_pair_30kb is_family_6x tandem_diverged tandem_sh
     n_disp=$(($(wc -l < "$out/dispersed_pairs.tsv") - 1))
     n_inv=$(($(wc -l < "$out/inverted_pairs.tsv") - 1))
     n_mult=$(($(wc -l < "$out/unit_multiples.tsv") - 1))
-    printf "  %-18s %2d tandem  %2d dispersed  %2d inverted  %2d multiple\n" \
-        "$g" "$n_tandem" "$n_disp" "$n_inv" "$n_mult"
+    n_short=$(($(wc -l < "$out/short_unit_arrays.tsv") - 1))
+    printf "  %-18s %2d tandem  %2d dispersed  %2d inverted  %2d multiple  %2d short array\n" \
+        "$g" "$n_tandem" "$n_disp" "$n_inv" "$n_mult" "$n_short"
 done
 
 echo
