@@ -12,9 +12,18 @@ set -euo pipefail
 
 HERE=$(cd "$(dirname "$0")" && pwd)
 REF_DIR=${REF_DIR:-genome/pop_ncbi_ref}
-VERSION=$(python -c "import tandem; print(tandem.__version__)")
+# Ask the installed command, not `python -c "import tandem"`: run from a
+# folder holding a tandem/ source tree, the import picks up that copy instead.
+VERSION=$(tandem --version | awk '{print $2}')
 OUT_BASE=${OUT_BASE:-test_module1_v$VERSION}
 THREADS=${THREADS:-8}
+
+# Never write over an earlier run unless asked to.
+if [ -n "$(ls -A "$OUT_BASE" 2>/dev/null)" ] && [ "${OVERWRITE:-0}" != 1 ]; then
+    echo "ERROR: $OUT_BASE already holds results. Set OUT_BASE to a new folder," >&2
+    echo "       or OVERWRITE=1 to replace them." >&2
+    exit 1
+fi
 
 mkdir -p "$OUT_BASE"
 

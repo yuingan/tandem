@@ -1,11 +1,12 @@
 """Summarise a Module 1 run, or compare an old run with a new one.
 
     python tests/compare_module1.py RUN
-    python tests/compare_module1.py OLD_RUN NEW_RUN
+    python tests/compare_module1.py OLD_RUN NEW_RUN [--detail]
 
 A run is one Module 1 output folder, or a folder of them (one per genome,
 matched by folder name between the two runs). Columns are read by name, so
-output from v0.3.0 works as well as from later versions.
+output from v0.3.0 works as well as from later versions. --detail lists the
+old calls that are gone and the new tandems the old run never reported.
 """
 
 import csv
@@ -110,35 +111,83 @@ def print_microhomology(runs):
               + ", ".join(f"{mh} bp x{n}" for mh, n in top))
 
 
+def fate(old, new):
+    """Sort old calls into kept / moved / gone, and find new calls with no old match."""
+    kept, moved, gone, matched = [], [], [], set()
+    for o in old["calls"]:
+        hit = next((i for i, n in enumerate(new["calls"]) if same_place(o, n)), None)
+        if hit is not None:
+            kept.append(o)
+            matched.add(hit)
+        elif any(same_place(o, p) for p in new["pairs"]):
+            moved.append(o)
+        else:
+            gone.append(o)
+    fresh = [n for i, n in enumerate(new["calls"]) if i not in matched]
+    return kept, moved, gone, fresh
+
+
 def print_fate(old_runs, new_runs):
     print(f"{'genome':<28} {'old calls':>10} {'still tandem':>13} "
-          f"{'now dispersed':>14} {'gone':>6} {'new only':>9}")
+          f"{'now dispersed':>14} {'gone':>6} {'new tandems':>12} {'not in old':>11}")
     for name in sorted(set(old_runs) | set(new_runs)):
         if name not in old_runs or name not in new_runs:
             print(f"{name:<28} {'(only in one run)':>40}")
             continue
-        old, new = old_runs[name], new_runs[name]
-        kept = moved = gone = 0
-        matched = set()
-        for o in old["calls"]:
-            hit = next((i for i, n in enumerate(new["calls"]) if same_place(o, n)), None)
-            if hit is not None:
-                kept += 1
-                matched.add(hit)
-            elif any(same_place(o, p) for p in new["pairs"]):
-                moved += 1
-            else:
-                gone += 1
-        new_only = len(new["calls"]) - len(matched)
-        print(f"{name:<28} {len(old['calls']):>10} {kept:>13} {moved:>14} "
-              f"{gone:>6} {new_only:>9}")
+        kept, moved, gone, fresh = fate(old_runs[name], new_runs[name])
+        print(f"{name:<28} {len(old_runs[name]['calls']):>10} {len(kept):>13} "
+              f"{len(moved):>14} {len(gone):>6} {len(new_runs[name]['calls']):>12} "
+              f"{len(fresh):>11}")
+
+
+GAP_BINS = [(101, 500), (501, 2000), (2001, 10000), (10001, None)]
+
+
+def print_gaps(runs):
+    """How far apart the dispersed pairs are. The 100 bp tandem cut-off sits
+    at the bottom of this; the first column is what a looser one would add."""
+    labels = [f"{a}-{b}" if b else f">{a - 1}" for a, b in GAP_BINS]
+    print(f"{'genome':<28} " + " ".join(f"{l:>11}" for l in labels))
+    for name, run in runs.items():
+        if not run["new_format"]:
+            continue
+        gaps = [int(p.get("distance", 0)) for p in run["pairs"]]
+        counts = [sum(a <= g and (b is None or g <= b) for g in gaps) for a, b in GAP_BINS]
+        print(f"{name:<28} " + " ".join(f"{c:>11}" for c in counts))
+
+
+def describe(row):
+    gap = row.get("distance", "?")
+    extra = ""
+    if "architecture" in row:
+        extra = f"  {row['architecture']}  loci={row.get('repeat_loci', '?')}"
+    return (f"{row['seq_id']}:{int(row['copy1_start']):,}-{int(row['copy1_end']):,} / "
+            f"{int(row['copy2_start']):,}-{int(row['copy2_end']):,}  "
+            f"{row.get('size', '?')}bp  {row.get('identity', '?')}%  gap {gap}{extra}")
+
+
+def print_detail(old_runs, new_runs):
+    for name in sorted(set(old_runs) & set(new_runs)):
+        _, _, gone, fresh = fate(old_runs[name], new_runs[name])
+        if not gone and not fresh:
+            continue
+        print(name)
+        for row in gone:
+            print(f"  gone      {describe(row)}")
+        for row in fresh:
+            print(f"  new       {describe(row)}")
 
 
 def main(args):
+    detail = "--detail" in args
+    args = [a for a in args if a != "--detail"]
     if len(args) == 1:
         runs = {k: load(v) for k, v in find_runs(args[0]).items()}
         print_composition(runs)
         print_microhomology(runs)
+        print()
+        print("Gaps between the copies of dispersed pairs (bp)")
+        print_gaps(runs)
     elif len(args) == 2:
         old = {k: load(v) for k, v in find_runs(args[0]).items()}
         new = {k: load(v) for k, v in find_runs(args[1]).items()}
@@ -150,6 +199,13 @@ def main(args):
         print()
         print("New run")
         print_composition(new)
+        print()
+        print("Gaps between the copies of dispersed pairs, new run (bp)")
+        print_gaps(new)
+        if detail:
+            print()
+            print("Calls gone from the old run, and new tandems it never reported")
+            print_detail(old, new)
     else:
         print(__doc__)
         return 1

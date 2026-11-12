@@ -515,8 +515,14 @@ def _save_results(confirmed, output_dir):
 
 
 def run_scan(ref_fasta, read1, read2=None, output_dir=".",
-             min_anchor=25, min_support=2, min_size=200):
-    """Find junctions in the reads, no coordinates needed."""
+             min_anchor=25, min_support=2, min_size=200, control=None):
+    """Find junctions in the reads, no coordinates needed.
+
+    control: junctions.tsv from a scan of a sample without the duplications,
+    such as the ancestor, best run with --min-support 1. Junctions found there
+    too are background (repeats, library artefacts, differences from the
+    reference), not events, and are marked with their control support.
+    """
     import csv
 
     from .junction_scan import scan
@@ -540,8 +546,22 @@ def run_scan(ref_fasta, read1, read2=None, output_dir=".",
 
     results.sort(key=lambda r: -r["junction_reads"])
 
-    columns = ["seq_id", "start", "end", "size", "microhomology", "junction_reads",
-               "reference_reads", "dosage", "depth_dosage"]
+    if control:
+        background = _read_control(control)
+        for r in results:
+            r["control_reads"] = sum(
+                c["junction_reads"] for c in background
+                if c["seq_id"] == r["seq_id"]
+                and abs(c["start"] - r["start"]) <= CONTROL_SLOP
+                and abs(c["end"] - r["end"]) <= CONTROL_SLOP)
+        n = sum(1 for r in results if r["control_reads"])
+        logger.info(f"  {n} of {len(results)} junction(s) also found in the control")
+
+    columns = ["seq_id", "start", "end", "size", "microhomology",
+               "junction_reads", "reference_reads", "dosage", "dosage_raw",
+               "junction_visible", "reference_visible", "depth_dosage"]
+    if control:
+        columns.append("control_reads")
     path = os.path.join(output_dir, "junctions.tsv")
     with open(path, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=columns, delimiter="\t",
@@ -550,9 +570,26 @@ def run_scan(ref_fasta, read1, read2=None, output_dir=".",
         writer.writerows(results)
 
     for r in results:
+        note = f"  control={r['control_reads']}" if control else ""
         logger.info(
             f"  {r['seq_id']}:{r['start']:,}-{r['end']:,}  {r['size']:,}bp  "
             f"junction={r['junction_reads']} reference={r['reference_reads']}  "
-            f"dosage={r['dosage']}  depth={r['depth_dosage']}"
+            f"dosage={r['dosage']} (raw {r['dosage_raw']}, junction visible "
+            f"{r['junction_visible']})  depth={r['depth_dosage']}{note}"
         )
     return results
+
+
+CONTROL_SLOP = 50   # bp; the same background junction lands within a few bases
+
+
+def _read_control(path):
+    import csv
+    rows = []
+    with open(path) as f:
+        for r in csv.DictReader(f, delimiter="\t"):
+            if r.get("seq_id"):
+                rows.append({"seq_id": r["seq_id"], "start": int(r["start"]),
+                             "end": int(r["end"]),
+                             "junction_reads": int(r["junction_reads"])})
+    return rows

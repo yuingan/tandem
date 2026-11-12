@@ -3,9 +3,10 @@
     python tests/check_scan.py WORKDIR
 
 Covers the cases real data throws at the scanner: reads running across the
-origin of a circular chromosome, a duplication on a second contig, and a
-small indel that should stay below the size floor. Prints PASS/FAIL per case
-and exits non-zero if anything failed.
+origin of a circular chromosome, a duplication on a second contig, a small
+indel that should stay below the size floor, a repeat right beside the
+junction, and background marked from a control sample. Prints PASS/FAIL per
+case and exits non-zero if anything failed.
 """
 
 import csv
@@ -26,10 +27,10 @@ def write_fasta(path, records):
                 f.write(seq[i:i + 70] + "\n")
 
 
-def simulate(ref, prefix, start, end, freq, seed):
+def simulate(ref, prefix, start, end, freq, seed, depth=100):
     subprocess.run(
         [sys.executable, SIMULATE, ref, prefix, "--start", str(start),
-         "--end", str(end), "--frequency", str(freq), "--depth", "100",
+         "--end", str(end), "--frequency", str(freq), "--depth", str(depth),
          "--circular", "--seed", str(seed)],
         check=True, capture_output=True)
     return prefix + "_R1.fq", prefix + "_R2.fq"
@@ -43,9 +44,9 @@ def concat(paths, out):
     return out
 
 
-def run_scan(ref, r1, r2, outdir):
+def run_scan(ref, r1, r2, outdir, extra=()):
     subprocess.run(["tandem", "-r", ref, "-i", r1, "-I", r2, "-iso",
-                    "-o", outdir], check=True, capture_output=True)
+                    "-o", outdir, *extra], check=True, capture_output=True)
     with open(os.path.join(outdir, "junctions.tsv")) as f:
         return list(csv.DictReader(f, delimiter="\t"))
 
@@ -95,6 +96,38 @@ def main(work):
     rows = run_scan(chrom_fa, s1, s2, os.path.join(work, "out_small"))
     results.append(("3 bp duplication stays below --min-size", len(rows) == 0,
                     f"{len(rows)} junction(s)"))
+
+    # 4. The first 80 bp of the unit also occur elsewhere, so most reads across
+    #    the junction can't be placed. The raw ratio drops well below the
+    #    truth; the corrected one should not.
+    random.seed(12)
+    base = list("".join(random.choice("ACGT") for _ in range(300_000)))
+    base[200000:200080] = base[100000:100080]
+    rep_fa = os.path.join(work, "repeat_at_start.fna")
+    write_fasta(rep_fa, [("chrom", "".join(base))])
+    # deep enough that the reads left countable (about 40%) pin the estimate
+    r1, r2 = simulate(rep_fa, os.path.join(work, "rep"), 100001, 110000, 0.5, 15,
+                      depth=600)
+    rows = [r for r in run_scan(rep_fa, r1, r2, os.path.join(work, "out_rep"))
+            if near(r, "chrom", 100001, 110000)]
+    ok = (len(rows) == 1 and float(rows[0]["dosage_raw"]) < 0.3
+          and 0.3 <= float(rows[0]["dosage"]) <= 0.7)
+    detail = (f"raw {rows[0]['dosage_raw']}, corrected {rows[0]['dosage']} "
+              f"(truth 0.5)") if rows else "not found"
+    results.append(("repeat beside the junction, f=0.5", ok, detail))
+
+    # 5. A junction that is also in the control is marked with its support there.
+    c1, c2 = simulate(chrom_fa, os.path.join(work, "ctrl"), 50000, 60000, 0.2, 16)
+    ctrl_rows = run_scan(chrom_fa, c1, c2, os.path.join(work, "out_ctrl"),
+                         extra=["--min-support", "1"])
+    rows = run_scan(chrom_fa, os.path.join(work, "circ_R1.fq"),
+                    os.path.join(work, "circ_R2.fq"), os.path.join(work, "out_vs_ctrl"),
+                    extra=["--control-junctions",
+                           os.path.join(work, "out_ctrl", "junctions.tsv")])
+    ok = (len(ctrl_rows) >= 1 and len(rows) == 1
+          and int(rows[0]["control_reads"]) > 0)
+    detail = f"control_reads {rows[0]['control_reads']}" if rows else "not found"
+    results.append(("junction also in the control is marked", ok, detail))
 
     failed = 0
     for name, ok, detail in results:

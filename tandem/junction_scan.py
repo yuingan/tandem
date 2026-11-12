@@ -11,6 +11,15 @@ same tolerance - so the losses cancel:
     dosage = junction_reads / reference_reads ~ f(n-1)
 
 A ratio, not a proportion: J/(J+R) is f/(1+f) and caps at 0.5.
+
+Both kinds of read count only with a unique anchor wholly on each side of
+the boundary they cross. Otherwise a junction read whose far side sits in a
+repeat keeps anchors on one side only and passes for a reference read.
+
+Next to a repeat the two counts still lose different shares of their reads,
+so each is divided by the number of read placements the scan could have
+counted at that spot, worked out from the reference (_countable). The
+uncorrected ratio is kept as dosage_raw.
 """
 
 import gzip
@@ -73,9 +82,12 @@ def _anchor_reads(reads, index, k, stride, contig_start, contig_end):
     Only anchors on [contig_start, contig_end) of the concatenated index are
     kept, and positions come back in that contig's own coordinates.
     """
-    spacer = "N" * k
-    concat = spacer.join(reads)
-    starts = np.cumsum([0] + [len(r) + k for r in reads[:-1]])
+    # Pad each read so the next one starts on a multiple of the stride. Every
+    # read then has its anchors at offsets 0, stride, 2*stride..., the one
+    # pattern _countable assumes, whatever the read lengths are.
+    pads = [k + (-(len(r) + k)) % stride for r in reads]
+    concat = "".join(r + "N" * pad for r, pad in zip(reads, pads))
+    starts = np.cumsum([0] + [len(r) + pad for r, pad in zip(reads[:-1], pads[:-1])])
 
     codes, offsets = _encode_all(concat, k, stride=stride)
     if len(codes) == 0:
@@ -153,6 +165,8 @@ def scan(ref_seq, read_paths, k=ANCHOR_K, stride=STRIDE,
     votes = {}
     linear_diag = []
     linear_len = []
+    linear_first = []     # in-read offset of the first and last anchor
+    linear_last = []
     depth_delta = np.zeros(len(ref_seq) + 2, dtype=np.int32)
 
     n_reads = 0
@@ -175,6 +189,8 @@ def scan(ref_seq, read_paths, k=ANCHOR_K, stride=STRIDE,
             edges = np.r_[0, np.nonzero(np.diff(read_id))[0] + 1]
             lo_diag = np.minimum.reduceat(diag, edges)
             hi_diag = np.maximum.reduceat(diag, edges)
+            first = np.minimum.reduceat(in_read, edges)
+            last = np.maximum.reduceat(in_read, edges)
 
             # one diagonal = ancestral allele + depth signal; handled in bulk
             straight = lo_diag == hi_diag
@@ -182,6 +198,8 @@ def scan(ref_seq, read_paths, k=ANCHOR_K, stride=STRIDE,
             n = lengths[read_id[edges[straight]]]
             linear_diag.append(d)
             linear_len.append(n)
+            linear_first.append(first[straight])
+            linear_last.append(last[straight])
 
             starts = np.clip(d, 0, len(ref_seq))
             ends = np.clip(d + n, 0, len(ref_seq))
@@ -196,24 +214,39 @@ def scan(ref_seq, read_paths, k=ANCHOR_K, stride=STRIDE,
 
     logger.info(f"  Scanned {n_reads:,} reads, {len(votes)} candidate junction(s)")
 
-    diags = np.concatenate(linear_diag) if linear_diag else np.empty(0, np.int64)
-    lens = np.concatenate(linear_len) if linear_len else np.empty(0, np.int64)
+    empty = np.empty(0, np.int64)
+    diags = np.concatenate(linear_diag) if linear_diag else empty
+    lens = np.concatenate(linear_len) if linear_len else empty
+    firsts = np.concatenate(linear_first) if linear_first else empty
+    lasts = np.concatenate(linear_last) if linear_last else empty
     depth = np.cumsum(depth_delta[:len(ref_seq)])
+    read_len = int(np.median(lens)) if len(lens) else 150
 
     results = []
     for (start0, end0), support in sorted(votes.items(), key=lambda kv: -kv[1]):
         if support < min_support:
             continue
-        ref_count = _count_reference_reads(diags, lens, end0 + 1, min_anchor)
-        microhomology = _homology(start0, end0, ref_seq)
+        ref_count = _count_reference_reads(diags, lens, firsts, lasts,
+                                           end0 + 1, min_anchor, k)
+        uniq = _uniqueness(ref_seq, index, k, [(end0 - read_len, end0 + read_len),
+                                               (start0 - read_len, start0 + read_len)])
+        can_j = _countable(uniq, end0, start0, read_len, min_anchor, k, stride)
+        can_r = _countable(uniq, end0, end0 + 1, read_len, min_anchor, k, stride)
+        most = read_len - 2 * min_anchor + 1     # placements with no repeats around
+
+        raw = support / ref_count if ref_count else None
+        fixed = raw * can_r / can_j if raw is not None and can_j else None
         results.append({
             "start": start0 + 1,
             "end": end0 + 1,
             "size": end0 - start0 + 1,
-            "microhomology": microhomology,
+            "microhomology": _homology(start0, end0, ref_seq),
             "junction_reads": int(support),
             "reference_reads": int(ref_count),
-            "dosage": round(support / ref_count, 4) if ref_count else None,
+            "dosage": round(fixed, 4) if fixed is not None else None,
+            "dosage_raw": round(raw, 4) if raw is not None else None,
+            "junction_visible": round(can_j / most, 3),
+            "reference_visible": round(can_r / most, 3),
             "depth_dosage": _depth_dosage(depth, start0, end0),
         })
     return results
@@ -295,9 +328,59 @@ def _depth_dosage(depth, start0, end0):
     return round(float(np.median(inside)) / base - 1.0, 4)
 
 
-def _count_reference_reads(diags, lengths, boundary_0, min_anchor):
-    """The denominator: ancestral-boundary reads, counted like the numerator."""
+def _uniqueness(ref_seq, index, k, windows):
+    """uniq(p): does the k-mer starting at p occur once in the genome, either strand?"""
+    masks = []
+    for a, b in windows:
+        a, b = max(a, 0), min(b, len(ref_seq) - k + 1)
+        mask = np.zeros(max(b - a, 0), dtype=bool)
+        if b > a:
+            codes, offs = _encode_all(ref_seq[a:b + k - 1], k)
+            fwd = (np.searchsorted(index._codes, codes, side="right")
+                   - np.searchsorted(index._codes, codes, side="left"))
+            rc = _rc_codes(codes, k)
+            rev = (np.searchsorted(index._codes, rc, side="right")
+                   - np.searchsorted(index._codes, rc, side="left"))
+            mask[offs] = (fwd == 1) & (rev == 0)
+        masks.append((a, mask))
+
+    def uniq(p):
+        for a, mask in masks:
+            if a <= p < a + len(mask):
+                return bool(mask[p - a])
+        return False
+    return uniq
+
+
+def _countable(uniq, left_end, right_start, read_len, min_anchor, k, stride):
+    """Read placements across a boundary the scan would count.
+
+    The read takes s bases ending at left_end, then the rest from right_start
+    (left_end + 1 for plain reference). Its anchors sit at offsets 0, stride,
+    2*stride... (see _anchor_reads), and it counts with a unique anchor wholly
+    on each side, the rule both _vote and _count_reference_reads apply.
+    """
+    total = 0
+    for s in range(min_anchor, read_len - min_anchor + 1):
+        left = right = False
+        for o in range(0, read_len - k + 1, stride):
+            if o + k <= s:
+                left = left or uniq(left_end - s + 1 + o)
+            elif o >= s:
+                right = right or uniq(right_start + o - s)
+        total += left and right
+    return total
+
+
+def _count_reference_reads(diags, lengths, firsts, lasts, boundary_0, min_anchor, k):
+    """The denominator: reads straight through the ancestral boundary.
+
+    Same rule as a junction read: enough bases on each side, and a unique
+    anchor wholly on each side.
+    """
     if not len(diags):
         return 0
-    left = boundary_0 - diags
-    return int(((left >= min_anchor) & (lengths - left >= min_anchor)).sum())
+    left = boundary_0 - diags            # bases of the read before the boundary
+    ok = ((left >= min_anchor) & (lengths - left >= min_anchor)
+          & (firsts + k <= left) & (lasts >= left))
+    return int(ok.sum())

@@ -76,6 +76,12 @@ Examples:
              "to the ancestral allele too, so both are counted the same way."
     )
     parser.add_argument(
+        "--control-junctions", metavar="TSV",
+        help="junctions.tsv from scanning a sample without the duplications, "
+             "e.g. the ancestor (run that scan with --min-support 1). Junctions "
+             "also found there are marked with their control support."
+    )
+    parser.add_argument(
         "--min-support", type=int, default=2,
         help="Reads crossing a junction before it is reported (default: 2)"
     )
@@ -365,6 +371,8 @@ def _validate_args(args, parser):
         parser.error(f"Forward reads not found: {args.read1}")
     if args.read2 and not os.path.isfile(args.read2):
         parser.error(f"Reverse reads not found: {args.read2}")
+    if args.control_junctions and not os.path.isfile(args.control_junctions):
+        parser.error(f"Control junctions not found: {args.control_junctions}")
 
     if args.metadata and not os.path.isfile(args.metadata):
         parser.error(f"Metadata file not found: {args.metadata}")
@@ -479,6 +487,7 @@ def main(argv=None):
                 min_anchor=args.min_anchor,
                 min_support=args.min_support,
                 min_size=args.min_size,
+                control=args.control_junctions,
             )
             module_name = "module2"
         else:
