@@ -76,6 +76,29 @@ def build():
         "150bp tandem, below --min-size 200",
     )
 
+    # Two copies 300bp apart, the second reversed. Not a tandem duplication.
+    inv = rand_seq(2000)
+    flipped = inv[::-1].translate(str.maketrans("ACGT", "TGCA"))
+    cases["inverted_pair"] = (
+        backbone[:20000] + inv + rand_seq(300) + flipped + backbone[20000:],
+        "inverted pair 300bp apart, not a duplication",
+    )
+
+    # Six copies of a 113bp unit, each 4% diverged. The self-alignments at
+    # 226 and 339bp clear the size floor and used to come out as an array
+    # and a pair, though the unit itself is below it.
+    unit113 = rand_seq(113)
+    copies = []
+    for _ in range(6):
+        c = list(unit113)
+        for pos in random.sample(range(113), 4):
+            c[pos] = random.choice("ACGT".replace(c[pos], ""))
+        copies.append("".join(c))
+    cases["array_unit_113"] = (
+        backbone[:20000] + "".join(copies) + backbone[20000:],
+        "array of a 113bp unit, below --min-size 200",
+    )
+
     return cases
 
 

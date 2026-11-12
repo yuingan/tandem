@@ -26,6 +26,16 @@ def reverse_complement(seq):
     return seq.translate(_COMPLEMENT)[::-1]
 
 
+def _rc_codes(codes, k):
+    """Reverse complement of packed k-mers (A=0 C=1 G=2 T=3, last base lowest)."""
+    rc = np.zeros_like(codes)
+    x = codes.copy()
+    for _ in range(k):
+        rc = (rc << 2) | (3 - (x & 3))
+        x >>= 2
+    return rc
+
+
 def _encode_all(seq, k, stride=1):
     """Pack every stride-th k-mer into an int64. K-mers with N are dropped."""
     values = _CODE[np.frombuffer(seq.encode(), dtype=np.uint8)]
@@ -66,11 +76,41 @@ class KmerIndex:
         order = np.argsort(codes, kind="stable")
         self._codes = codes[order]
         self._offsets = offsets[order]
+        self._anchors = None
 
         logger.debug(
             f"KmerIndex: {len(sequences)} sequence(s), "
             f"{len(self._concat):,} bp, {len(self._codes):,} k-mers at k={self.k}"
         )
+
+    def anchor_table(self):
+        """K-mers that can place a read, sorted, with their positions.
+
+        An anchor occurs once in the genome and not at all on the other
+        strand. Working this out once here leaves the scanner one binary
+        search per read k-mer instead of four.
+        """
+        if self._anchors is None:
+            codes, offsets = self._codes, self._offsets
+            if len(codes) == 0:
+                self._anchors = (codes, offsets)
+                return self._anchors
+            differs = codes[1:] != codes[:-1]
+            once = np.r_[True, differs] & np.r_[differs, True]
+            c, p = codes[once], offsets[once]
+            rc = _rc_codes(c, self.k)
+            j = np.minimum(np.searchsorted(codes, rc), len(codes) - 1)
+            keep = codes[j] != rc            # palindromes fall out here too
+            self._anchors = (c[keep], p[keep])
+        return self._anchors
+
+    def anchors_at(self, codes):
+        """Index into anchor_table() for each code, or -1 where it is no anchor."""
+        table, _ = self.anchor_table()
+        if len(table) == 0 or len(codes) == 0:
+            return np.full(len(codes), -1, dtype=np.int64)
+        j = np.minimum(np.searchsorted(table, codes), len(table) - 1)
+        return np.where(table[j] == codes, j, -1)
 
     def _code(self, kmer):
         values = _CODE[np.frombuffer(kmer.encode(), dtype=np.uint8)]

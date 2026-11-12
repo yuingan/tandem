@@ -515,7 +515,8 @@ def _save_results(confirmed, output_dir):
 
 
 def run_scan(ref_fasta, read1, read2=None, output_dir=".",
-             min_anchor=25, min_support=2, min_size=200, control=None):
+             min_anchor=25, min_support=2, min_size=200, control=None,
+             threads=1):
     """Find junctions in the reads, no coordinates needed.
 
     control: junctions.tsv from a scan of a sample without the duplications,
@@ -540,7 +541,8 @@ def run_scan(ref_fasta, read1, read2=None, output_dir=".",
         # one pass over the reads per contig; positions are contig-local
         for hit in scan(seq, [read1, read2], min_anchor=min_anchor,
                         min_support=min_support, min_size=min_size,
-                        index=index, contig_start=index._seq_offsets[seq_id]):
+                        index=index, contig_start=index._seq_offsets[seq_id],
+                        threads=threads):
             hit["seq_id"] = seq_id
             results.append(hit)
 

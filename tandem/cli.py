@@ -185,8 +185,9 @@ Examples:
     )
     parser.add_argument(
         "--keep-dispersed", action="store_true",
-        help="Keep dispersed repeat pairs in the main results table instead "
-             "of writing them to dispersed_pairs.tsv"
+        help="Also list dispersed repeat pairs in the main results table. "
+             "They are written to dispersed_pairs.tsv either way; inverted "
+             "pairs always go to inverted_pairs.tsv"
     )
     parser.add_argument(
         "--diverged-below", type=float, default=99.0,
@@ -488,6 +489,7 @@ def main(argv=None):
                 min_support=args.min_support,
                 min_size=args.min_size,
                 control=args.control_junctions,
+                threads=args.threads,
             )
             module_name = "module2"
         else:

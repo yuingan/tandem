@@ -422,18 +422,61 @@ def check_hr(genome_seq, c1s_0, c1e_0, c2s_0, c2e_0,
 # Microhomology detection at junction
 # =============================================================================
 
-def find_microhomology(seq1, seq2, max_len=None):
-    """Find maximum exact microhomology at junction.
-    Checks if end of seq1 matches start of seq2.
+MH_CAP = 200   # beyond this it is a repeat, not microhomology; also stops arrays running on
+
+
+def junction_microhomology(genome, c1s, c1e, c2s, c2e, overlap=0, cap=MH_CAP):
+    """Microhomology at the junction between two adjacent copies (0-based, half-open).
+
+    The junction joins the end of the first copy to the start of the second.
+    It can be moved left while the first copy's last base equals the base just
+    before the first copy, and right while the second copy's first base equals
+    the base just after the second copy. The total distance it can move is the
+    microhomology: bases that could have come from either side.
+
+    Comparing the end of one copy with the start of the other does not measure
+    this. It asks whether the unit begins and ends with the same bases, which
+    happens by chance about a third of the time.
+
+    overlap is what NUCmer reported before the copies were made adjacent; the
+    first copy still includes it. Copies with a spacer between them have no
+    single junction to read and get 0.
+
+    Returns (length, sequence).
     """
-    if max_len is None:
-        max_check = min(len(seq1), len(seq2))
-    else:
-        max_check = min(max_len, len(seq1), len(seq2))
-    for k in range(max_check, 0, -1):
-        if seq1[-k:] == seq2[:k]:
-            return k
-    return 0
+    if c2s != c1e:
+        return 0, ""
+    left_period = (c1e - c1s) - overlap
+    right_period = c2e - c2s
+    left = 0
+    while (left < cap and c1e - 1 - left - left_period >= 0
+           and genome[c1e - 1 - left] == genome[c1e - 1 - left - left_period]):
+        left += 1
+    right = 0
+    while (right < cap and c2s + right + right_period < len(genome)
+           and genome[c2s + right] == genome[c2s + right + right_period]):
+        right += 1
+    return left + right, genome[c1e - left:c2s + right]
+
+
+def single_copy_microhomology(ref, start_0, end_0, cap=MH_CAP):
+    """Microhomology at the junction of a duplication of ref[start_0:end_0].
+
+    Here the reference carries one copy, and the duplication joins its end
+    to its start. The junction can move left while the unit's last base
+    equals the base before the unit, and right while the unit's first base
+    equals the base after it. Returns (length, sequence as read across the
+    junction).
+    """
+    left = 0
+    while (left < cap and start_0 - 1 - left >= 0
+           and ref[end_0 - 1 - left] == ref[start_0 - 1 - left]):
+        left += 1
+    right = 0
+    while (right < cap and end_0 + right < len(ref)
+           and ref[start_0 + right] == ref[end_0 + right]):
+        right += 1
+    return left + right, ref[end_0 - left:end_0] + ref[start_0:start_0 + right]
 
 
 def classify_junction(genome_seq, c1s_0, c1e_0, c2s_0, c2e_0,
@@ -441,7 +484,7 @@ def classify_junction(genome_seq, c1s_0, c1e_0, c2s_0, c2e_0,
                       hr_min_identity=HR_MIN_IDENTITY,
                       hr_max_inward=HR_MAX_WINDOW,
                       hr_outward_ext=HR_OUTWARD_EXTENSION,
-                      hr_complexity_filter=True):
+                      hr_complexity_filter=True, overlap=0):
     """Classify a tandem duplication junction.
 
     Two-step approach:
@@ -461,13 +504,8 @@ def classify_junction(genome_seq, c1s_0, c1e_0, c2s_0, c2e_0,
         complexity_filter=hr_complexity_filter,
     )
 
-    # Measure microhomology at junction
-    flank_size = min(JUNCTION_FLANK, c1e_0 - c1s_0)
-    upstream_flank = genome_seq[max(0, c1e_0 - flank_size) : c1e_0]
-    downstream_flank = genome_seq[c2s_0 : min(len(genome_seq), c2s_0 + flank_size)]
-
-    microhomology_bp = find_microhomology(upstream_flank, downstream_flank)
-    microhomology_seq = upstream_flank[-microhomology_bp:] if microhomology_bp > 0 else ""
+    microhomology_bp, microhomology_seq = junction_microhomology(
+        genome_seq, c1s_0, c1e_0, c2s_0, c2e_0, overlap=overlap)
 
     # Junction gap (inter-copy distance)
     junction_gap = c2s_0 - c1e_0
@@ -500,11 +538,11 @@ def classify_single_copy_junction(ref_seq, start_0, end_0,
     This function differs from classify_junction (used by Module 1) in
     two critical ways:
 
-    Microhomology: The biological junction in the mutant is
-      ref[end-k:end] + ref[start:start+k]  (end of Y followed by start
-      of Y). So microhomology = overlap between END of Y and START of Y.
-      classify_junction would incorrectly compare end of Y vs downstream
-      genomic context.
+    Microhomology: the junction in the mutant reads ref[..end] + ref[start..].
+      Bases there that match both parental sites (the end of Y and the
+      base before Y; the start of Y and the base after Y) could have come
+      from either side; see single_copy_microhomology. Comparing the end of Y
+      with the start of Y, as this function used to, measures something else.
 
     HR detection: Asks "does the reference have R-Y-R structure?" — are
       there direct repeats flanking Y on both sides? Compares the region
@@ -516,15 +554,7 @@ def classify_single_copy_junction(ref_seq, start_0, end_0,
     dup_length = end_0 - start_0
     seq_len = len(ref_seq)
 
-    # Microhomology at the biological junction
-    # Junction in the mutant: ...ref[end-k:end] | ref[start:start+k]...
-    # MH = how many bases at end of Y match start of Y
-    flank_size = min(JUNCTION_FLANK, dup_length)
-    upstream_flank = ref_seq[max(0, end_0 - flank_size) : end_0]
-    downstream_flank = ref_seq[start_0 : min(seq_len, start_0 + flank_size)]
-
-    microhomology_bp = find_microhomology(upstream_flank, downstream_flank)
-    microhomology_seq = upstream_flank[-microhomology_bp:] if microhomology_bp > 0 else ""
+    microhomology_bp, microhomology_seq = single_copy_microhomology(ref_seq, start_0, end_0)
 
     # HR detection
     # Four scenarios test for direct repeats that could mediate HR.

@@ -24,7 +24,9 @@ uncorrected ratio is kept as dosage_raw.
 
 import gzip
 import logging
+import multiprocessing
 import time
+from collections import deque
 
 import numpy as np
 
@@ -66,16 +68,6 @@ def read_chunks(paths, chunk=CHUNK_READS):
         yield batch
 
 
-def _rc_codes(codes, k):
-    """Reverse complement of packed k-mers (A=0 C=1 G=2 T=3, last base lowest)."""
-    rc = np.zeros_like(codes)
-    x = codes.copy()
-    for _ in range(k):
-        rc = (rc << 2) | (3 - (x & 3))
-        x >>= 2
-    return rc
-
-
 def _anchor_reads(reads, index, k, stride, contig_start, contig_end):
     """Returns (read_id, offset in read, diagonal) per matched anchor.
 
@@ -93,19 +85,16 @@ def _anchor_reads(reads, index, k, stride, contig_start, contig_end):
     if len(codes) == 0:
         return (np.empty(0, np.int64),) * 3
 
-    lo = np.searchsorted(index._codes, codes, side="left")
-    hi = np.searchsorted(index._codes, codes, side="right")
-    rc = _rc_codes(codes, k)
-    rc_hits = (np.searchsorted(index._codes, rc, side="right")
-               - np.searchsorted(index._codes, rc, side="left"))
-    # An anchor found anywhere else, on either strand, can't place the read.
-    # Checking only the forward strand let inverted repeats misplace reads.
-    unique = ((hi - lo) == 1) & (rc_hits == 0)
-    if not unique.any():
+    # only k-mers found once in the genome, and not on the other strand, can
+    # place a read; the index has that list ready
+    hit = index.anchors_at(codes)
+    keep = hit >= 0
+    if not keep.any():
         return (np.empty(0, np.int64),) * 3
 
-    offsets = offsets[unique]
-    ref_pos = index._offsets[lo[unique]]
+    _, anchor_pos = index.anchor_table()
+    offsets = offsets[keep]
+    ref_pos = anchor_pos[hit[keep]]
     on_contig = (ref_pos >= contig_start) & (ref_pos < contig_end)
     offsets = offsets[on_contig]
     ref_pos = ref_pos[on_contig] - contig_start
@@ -150,77 +139,66 @@ def _exact_junction(read, ref, diag_left, diag_right, lo, hi):
 
 def scan(ref_seq, read_paths, k=ANCHOR_K, stride=STRIDE,
          min_anchor=MIN_ANCHOR, min_support=MIN_SUPPORT, min_size=MIN_SIZE,
-         index=None, contig_start=0):
+         index=None, contig_start=0, threads=1):
     """Junctions with support counts. Coordinates are 1-based inclusive.
 
     With a shared index over several contigs, contig_start is where ref_seq
-    begins in that index (KmerIndex._seq_offsets).
+    begins in that index (KmerIndex._seq_offsets). With threads > 1 blocks of
+    reads go to worker processes; results are merged in file order, so the
+    output does not depend on the thread count.
     """
     if index is None:
         index = KmerIndex({"ref": ref_seq}, min_k=k)
         contig_start = 0
     k = index.k
-    contig_end = contig_start + len(ref_seq)
+    index.anchor_table()          # build once here, before any worker forks
+    _SHARED.update(index=index, ref_seq=ref_seq, k=k, stride=stride,
+                   contig_start=contig_start, contig_end=contig_start + len(ref_seq),
+                   min_anchor=min_anchor, min_size=min_size)
 
     votes = {}
-    linear_diag = []
-    linear_len = []
-    linear_first = []     # in-read offset of the first and last anchor
-    linear_last = []
+    parts = {"diag": [], "len": [], "first": [], "last": []}
     depth_delta = np.zeros(len(ref_seq) + 2, dtype=np.int32)
-
     n_reads = 0
     next_report = 1_000_000
     started = time.time()
-    for reads in read_chunks(read_paths):
-        n_reads += len(reads)
+
+    def merge(result):
+        nonlocal n_reads, next_report
+        n, chunk_votes, arrays = result
+        n_reads += n
+        for key, v in chunk_votes.items():
+            votes[key] = votes.get(key, 0) + v
+        for key in parts:
+            parts[key].append(arrays[key])
+        np.add.at(depth_delta, np.clip(arrays["diag"], 0, len(ref_seq)), 1)
+        np.add.at(depth_delta, np.clip(arrays["diag"] + arrays["len"], 0, len(ref_seq)), -1)
         if n_reads >= next_report:
             logger.info(f"  {n_reads:,} reads scanned ({time.time() - started:.0f}s)")
             next_report += 1_000_000
-        for orientation in (0, 1):
-            batch = reads if orientation == 0 else [reverse_complement(r) for r in reads]
-            read_id, in_read, diag = _anchor_reads(batch, index, k, stride,
-                                                   contig_start, contig_end)
-            if len(read_id) == 0:
-                continue
 
-            lengths = np.fromiter((len(r) for r in batch), dtype=np.int64,
-                                  count=len(batch))
-            edges = np.r_[0, np.nonzero(np.diff(read_id))[0] + 1]
-            lo_diag = np.minimum.reduceat(diag, edges)
-            hi_diag = np.maximum.reduceat(diag, edges)
-            first = np.minimum.reduceat(in_read, edges)
-            last = np.maximum.reduceat(in_read, edges)
-
-            # one diagonal = ancestral allele + depth signal; handled in bulk
-            straight = lo_diag == hi_diag
-            d = lo_diag[straight]
-            n = lengths[read_id[edges[straight]]]
-            linear_diag.append(d)
-            linear_len.append(n)
-            linear_first.append(first[straight])
-            linear_last.append(last[straight])
-
-            starts = np.clip(d, 0, len(ref_seq))
-            ends = np.clip(d + n, 0, len(ref_seq))
-            np.add.at(depth_delta, starts, 1)
-            np.add.at(depth_delta, ends, -1)
-
-            for i in np.nonzero(~straight)[0]:
-                lo = edges[i]
-                hi = edges[i + 1] if i + 1 < len(edges) else len(read_id)
-                _vote(votes, batch[read_id[lo]], ref_seq,
-                      diag[lo:hi], in_read[lo:hi], k, min_anchor, min_size)
+    if threads > 1:
+        # fork, so workers share the index rather than each building one
+        with multiprocessing.get_context("fork").Pool(threads) as pool:
+            pending = deque()
+            for reads in read_chunks(read_paths):
+                pending.append(pool.apply_async(_scan_chunk, (reads,)))
+                if len(pending) >= 2 * threads:     # keep memory bounded
+                    merge(pending.popleft().get())
+            while pending:
+                merge(pending.popleft().get())
+    else:
+        for reads in read_chunks(read_paths):
+            merge(_scan_chunk(reads))
 
     logger.info(f"  Scanned {n_reads:,} reads, {len(votes)} candidate junction(s)")
 
     empty = np.empty(0, np.int64)
-    diags = np.concatenate(linear_diag) if linear_diag else empty
-    lens = np.concatenate(linear_len) if linear_len else empty
-    firsts = np.concatenate(linear_first) if linear_first else empty
-    lasts = np.concatenate(linear_last) if linear_last else empty
+    diags, lens, firsts, lasts = (np.concatenate(parts[key]) if parts[key] else empty
+                                  for key in ("diag", "len", "first", "last"))
     depth = np.cumsum(depth_delta[:len(ref_seq)])
     read_len = int(np.median(lens)) if len(lens) else 150
+    logger.info(f"  Median read length {read_len} bp")
 
     results = []
     for (start0, end0), support in sorted(votes.items(), key=lambda kv: -kv[1]):
@@ -228,9 +206,10 @@ def scan(ref_seq, read_paths, k=ANCHOR_K, stride=STRIDE,
             continue
         ref_count = _count_reference_reads(diags, lens, firsts, lasts,
                                            end0 + 1, min_anchor, k)
+        mh = _homology(start0, end0, ref_seq)
         uniq = _uniqueness(ref_seq, index, k, [(end0 - read_len, end0 + read_len),
                                                (start0 - read_len, start0 + read_len)])
-        can_j = _countable(uniq, end0, start0, read_len, min_anchor, k, stride)
+        can_j = _countable(uniq, end0, start0, read_len, min_anchor, k, stride, mh)
         can_r = _countable(uniq, end0, end0 + 1, read_len, min_anchor, k, stride)
         most = read_len - 2 * min_anchor + 1     # placements with no repeats around
 
@@ -240,7 +219,7 @@ def scan(ref_seq, read_paths, k=ANCHOR_K, stride=STRIDE,
             "start": start0 + 1,
             "end": end0 + 1,
             "size": end0 - start0 + 1,
-            "microhomology": _homology(start0, end0, ref_seq),
+            "microhomology": mh,
             "junction_reads": int(support),
             "reference_reads": int(ref_count),
             "dosage": round(fixed, 4) if fixed is not None else None,
@@ -250,6 +229,52 @@ def scan(ref_seq, read_paths, k=ANCHOR_K, stride=STRIDE,
             "depth_dosage": _depth_dosage(depth, start0, end0),
         })
     return results
+
+
+_SHARED = {}    # what _scan_chunk needs; set by scan() before workers fork
+
+
+def _scan_chunk(reads):
+    """Anchor one block of reads (both strands) and vote for junctions.
+
+    Returns the read count, the votes, and the geometry of the reads that sit
+    on a single diagonal, which scan() needs for the reference count and depth.
+    """
+    sh = _SHARED
+    k, stride, ref_seq = sh["k"], sh["stride"], sh["ref_seq"]
+    votes = {}
+    out = {"diag": [], "len": [], "first": [], "last": []}
+
+    for orientation in (0, 1):
+        batch = reads if orientation == 0 else [reverse_complement(r) for r in reads]
+        read_id, in_read, diag = _anchor_reads(batch, sh["index"], k, stride,
+                                               sh["contig_start"], sh["contig_end"])
+        if len(read_id) == 0:
+            continue
+
+        lengths = np.fromiter((len(r) for r in batch), dtype=np.int64, count=len(batch))
+        edges = np.r_[0, np.nonzero(np.diff(read_id))[0] + 1]
+        lo_diag = np.minimum.reduceat(diag, edges)
+        hi_diag = np.maximum.reduceat(diag, edges)
+        first = np.minimum.reduceat(in_read, edges)
+        last = np.maximum.reduceat(in_read, edges)
+
+        # one diagonal = ancestral allele + depth signal; handled in bulk
+        straight = lo_diag == hi_diag
+        out["diag"].append(lo_diag[straight])
+        out["len"].append(lengths[read_id[edges[straight]]])
+        out["first"].append(first[straight])
+        out["last"].append(last[straight])
+
+        for i in np.nonzero(~straight)[0]:
+            lo = edges[i]
+            hi = edges[i + 1] if i + 1 < len(edges) else len(read_id)
+            _vote(votes, batch[read_id[lo]], ref_seq, diag[lo:hi], in_read[lo:hi],
+                  k, sh["min_anchor"], sh["min_size"])
+
+    empty = np.empty(0, np.int64)
+    arrays = {key: (np.concatenate(v) if v else empty) for key, v in out.items()}
+    return len(reads), votes, arrays
 
 
 def _vote(votes, read, ref_seq, diags, in_read, k, min_anchor, min_size):
@@ -266,12 +291,15 @@ def _vote(votes, read, ref_seq, diags, in_read, k, min_anchor, min_size):
                             int(on_left.max()) + k, int(on_right.min()))
     if split is None:
         return
-    if split < min_anchor or len(read) - split < min_anchor:
-        return
 
     end0 = split + uniq[0] - 1     # last base of the unit, 0-based
     start0 = split + uniq[1]       # first base of the unit, 0-based
     if start0 >= end0:
+        return
+    start0, end0, shift = left_align(start0, end0, ref_seq)
+    # enough bases on each side, measured where the junction is reported
+    s = split - shift
+    if s < min_anchor or len(read) - s < min_anchor:
         return
     # A read across the origin of a circular contig looks exactly like a
     # duplication of the whole contig. The slop covers assemblies whose ends
@@ -280,8 +308,6 @@ def _vote(votes, read, ref_seq, diags, in_read, k, min_anchor, min_size):
         return
     if end0 - start0 + 1 < min_size:
         return
-
-    start0, end0, _ = left_align(start0, end0, ref_seq)
     votes[(start0, end0)] = votes.get((start0, end0), 0) + 1
 
 
@@ -336,12 +362,7 @@ def _uniqueness(ref_seq, index, k, windows):
         mask = np.zeros(max(b - a, 0), dtype=bool)
         if b > a:
             codes, offs = _encode_all(ref_seq[a:b + k - 1], k)
-            fwd = (np.searchsorted(index._codes, codes, side="right")
-                   - np.searchsorted(index._codes, codes, side="left"))
-            rc = _rc_codes(codes, k)
-            rev = (np.searchsorted(index._codes, rc, side="right")
-                   - np.searchsorted(index._codes, rc, side="left"))
-            mask[offs] = (fwd == 1) & (rev == 0)
+            mask[offs] = index.anchors_at(codes) >= 0
         masks.append((a, mask))
 
     def uniq(p):
@@ -352,19 +373,23 @@ def _uniqueness(ref_seq, index, k, windows):
     return uniq
 
 
-def _countable(uniq, left_end, right_start, read_len, min_anchor, k, stride):
+def _countable(uniq, left_end, right_start, read_len, min_anchor, k, stride, mh=0):
     """Read placements across a boundary the scan would count.
 
     The read takes s bases ending at left_end, then the rest from right_start
     (left_end + 1 for plain reference). Its anchors sit at offsets 0, stride,
     2*stride... (see _anchor_reads), and it counts with a unique anchor wholly
     on each side, the rule both _vote and _count_reference_reads apply.
+
+    At a junction with mh bases of microhomology, s is measured at the
+    left-aligned position, and the first mh bases after it read the same on
+    both sides, so an anchor ending inside them still places the left side.
     """
     total = 0
     for s in range(min_anchor, read_len - min_anchor + 1):
         left = right = False
         for o in range(0, read_len - k + 1, stride):
-            if o + k <= s:
+            if o + k <= s + mh:
                 left = left or uniq(left_end - s + 1 + o)
             elif o >= s:
                 right = right or uniq(right_start + o - s)
