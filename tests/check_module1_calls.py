@@ -41,14 +41,30 @@ def main():
             aln(2304390, 2304841, 2304616, 2305067),
             aln(2304390, 2304728, 2304729, 2305067)]
     found = calls(rows)
-    results.append(("multiples of a 113 bp unit, --min-size 200", not found,
-                    f"{len(found)} call(s)"))
+    multiples = [c for c in found if c["structure"] == "unit_multiple"]
+    ok = len(found) == 2 and len(multiples) == 2 and all(c["unit"] == 113 for c in multiples)
+    results.append(("multiples of a 113 bp unit, --min-size 200", ok,
+                    f"{len(multiples)} of {len(found)} set aside as multiples"))
     found = calls(rows, min_size=100)
-    ok = (len(found) == 1 and found[0]["size"] == 113
-          and found[0]["copy_number"] == 6)
-    detail = (f"{found[0]['size']} bp x{found[0]['copy_number']}"
-              if len(found) == 1 else f"{len(found)} call(s)")
+    kept = [c for c in found if c["structure"] == "tandem"]
+    ok = (len(found) == 3 and len(kept) == 1
+          and kept[0]["size"] == 113 and kept[0]["copy_number"] == 6)
+    detail = (f"{kept[0]['size']} bp x{kept[0]['copy_number']}"
+              if len(kept) == 1 else f"{len(kept)} tandem call(s)")
     results.append(("the same at --min-size 100", ok, detail))
+
+    # Alignments whose shift is not the same at both ends: one starts on the
+    # diagonal, the other drifts 2 bp to 300 bp through a low-complexity
+    # stretch. Neither is a repeat unit. dev7 divided by the first one's zero
+    # shift, and read the second as a 2 bp unit and dropped the pair it
+    # covers. The pair is E. coli 1,096,961 (period 362), one of three calls
+    # dev7 lost there; the drifting alignments are made up.
+    found = calls([aln(1096961, 1097221, 1097323, 1097583, 99.2),
+                   aln(1096900, 1097700, 1096900, 1098000, 90.0),
+                   aln(1096900, 1097700, 1096902, 1098000, 90.0)])
+    ok = len(found) == 1 and found[0]["structure"] == "dispersed_pair"
+    results.append(("alignments drifting off the diagonal", ok,
+                    found[0]["structure"] if len(found) == 1 else f"{len(found)} call(s)"))
 
     # S. coelicolor: the terminal inverted repeats meet through the origin in
     # circular mode, one base apart. Was reported as a 21 kb tandem.

@@ -6,8 +6,8 @@
 A run is one Module 1 output folder, or a folder of them (one per genome,
 matched by folder name between the two runs). Columns are read by name, so
 output from v0.3.0 works as well as from later versions. --detail lists the
-old calls that are now inverted pairs or gone, and the new tandems the old
-run never reported.
+old calls that are now inverted pairs, multiples of a shorter repeat unit or
+gone, and the new tandems the old run never reported.
 """
 
 import csv
@@ -46,8 +46,9 @@ def load(folder):
     header, calls = read_tsv(os.path.join(folder, "tandem_duplications.tsv"))
     _, pairs = read_tsv(os.path.join(folder, "dispersed_pairs.tsv"))
     _, inverted = read_tsv(os.path.join(folder, "inverted_pairs.tsv"))
+    _, multiples = read_tsv(os.path.join(folder, "unit_multiples.tsv"))
     return {"new_format": "architecture" in header, "calls": calls,
-            "pairs": pairs, "inverted": inverted}
+            "pairs": pairs, "inverted": inverted, "multiples": multiples}
 
 
 def is_inverted(row):
@@ -81,12 +82,13 @@ def composition(run):
         row["diverged"] = sum(true(r.get("copies_diverged")) for r in calls)
         row["dispersed"] = len(run["pairs"])
         row["inverted"] = len(run["inverted"])
+        row["multiples"] = len(run["multiples"])
     else:
         row["flank"] = sum(has_flank(r) for r in calls)
         row["no_flank"] = len(calls) - row["flank"]
         # v0.3.0 kept dispersed and inverted pairs in the main table; count
         # the ones the current rules would set aside
-        row["array"] = row["diverged"] = None
+        row["array"] = row["diverged"] = row["multiples"] = None
         row["inverted"] = sum(is_inverted(r) for r in calls)
         row["dispersed"] = sum(int(r.get("distance", 0)) > 100 and not is_inverted(r)
                                for r in calls)
@@ -99,12 +101,13 @@ def fmt(value):
 
 def print_composition(runs):
     print(f"{'genome':<28} {'tandems':>8} {'flank rep':>10} {'no flank':>9} "
-          f"{'arrays':>7} {'diverged':>9} {'dispersed':>10} {'inverted':>9}")
+          f"{'arrays':>7} {'diverged':>9} {'dispersed':>10} {'inverted':>9} {'multiples':>10}")
     for name, run in runs.items():
         c = composition(run)
         print(f"{name:<28} {c['tandems']:>8} {c['flank']:>10} "
               f"{c['no_flank']:>9} {fmt(c['array']):>7} "
-              f"{fmt(c['diverged']):>9} {fmt(c['dispersed']):>10} {fmt(c['inverted']):>9}")
+              f"{fmt(c['diverged']):>9} {fmt(c['dispersed']):>10} {fmt(c['inverted']):>9} "
+              f"{fmt(c['multiples']):>10}")
     if any(not r["new_format"] for r in runs.values()):
         print("  (v0.3.0 output: 'dispersed' and 'inverted' count main-table calls: direct "
               "copies more than 100 bp apart, and reversed copies)")
@@ -123,9 +126,10 @@ def print_microhomology(runs):
 
 
 def fate(old, new):
-    """Sort old calls into kept / dispersed / inverted / gone, and find new
-    calls with no old match."""
-    kept, moved, flipped, gone, matched = [], [], [], [], set()
+    """Sort old calls into kept / dispersed / inverted / multiple / gone, and
+    find new calls with no old match. Multiples come back as (old, new) pairs
+    so the unit can be shown."""
+    kept, moved, flipped, multiple, gone, matched = [], [], [], [], [], set()
     for o in old["calls"]:
         hit = next((i for i, n in enumerate(new["calls"]) if same_place(o, n)), None)
         if hit is not None:
@@ -136,22 +140,26 @@ def fate(old, new):
         elif any(same_place(o, p) for p in new["inverted"]):
             flipped.append(o)
         else:
-            gone.append(o)
+            m = next((p for p in new["multiples"] if same_place(o, p)), None)
+            if m is not None:
+                multiple.append((o, m))
+            else:
+                gone.append(o)
     fresh = [n for i, n in enumerate(new["calls"]) if i not in matched]
-    return kept, moved, flipped, gone, fresh
+    return kept, moved, flipped, multiple, gone, fresh
 
 
 def print_fate(old_runs, new_runs):
     print(f"{'genome':<28} {'old calls':>10} {'still tandem':>13} "
-          f"{'now dispersed':>14} {'now inverted':>13} {'gone':>6} "
+          f"{'now dispersed':>14} {'now inverted':>13} {'now multiple':>13} {'gone':>6} "
           f"{'new tandems':>12} {'not in old':>11}")
     for name in sorted(set(old_runs) | set(new_runs)):
         if name not in old_runs or name not in new_runs:
             print(f"{name:<28} {'(only in one run)':>40}")
             continue
-        kept, moved, flipped, gone, fresh = fate(old_runs[name], new_runs[name])
+        kept, moved, flipped, multiple, gone, fresh = fate(old_runs[name], new_runs[name])
         print(f"{name:<28} {len(old_runs[name]['calls']):>10} {len(kept):>13} "
-              f"{len(moved):>14} {len(flipped):>13} {len(gone):>6} "
+              f"{len(moved):>14} {len(flipped):>13} {len(multiple):>13} {len(gone):>6} "
               f"{len(new_runs[name]['calls']):>12} {len(fresh):>11}")
 
 
@@ -183,12 +191,14 @@ def describe(row):
 
 def print_detail(old_runs, new_runs):
     for name in sorted(set(old_runs) & set(new_runs)):
-        _, _, flipped, gone, fresh = fate(old_runs[name], new_runs[name])
-        if not flipped and not gone and not fresh:
+        _, _, flipped, multiple, gone, fresh = fate(old_runs[name], new_runs[name])
+        if not flipped and not multiple and not gone and not fresh:
             continue
         print(name)
         for row in flipped:
             print(f"  inverted  {describe(row)}")
+        for row, m in multiple:
+            print(f"  multiple  {describe(row)}  ({m.get('unit', '?')} bp unit)")
         for row in gone:
             print(f"  gone      {describe(row)}")
         for row in fresh:

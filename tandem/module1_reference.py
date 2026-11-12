@@ -231,40 +231,39 @@ def _extent(call):
     return call["copy1_start"], call["copy2_end"]
 
 
-def _drop_period_multiples(calls, periodic):
-    """Drop calls that only restate a shorter repeat unit.
+def _mark_unit_multiples(calls, periodic):
+    """Set aside calls that only restate a shorter repeat unit.
 
     In an array of six 113 bp units, the self-alignment offset by 226 bp
     looks like a three-copy array and the one offset by 339 bp like a
     two-copy tandem, though neither is a duplication of its own. periodic
     holds (seq_id, start, end, period) for every direct self-alignment whose
-    two sides overlap, the unit too short to report included. A call lying
-    inside one of these regions, at a whole multiple of its period, goes.
+    two sides overlap by a clean shift, the unit too short to report
+    included. A call lying inside one of these regions, at a whole multiple
+    of its period, becomes a `unit_multiple` and records the unit.
     """
     by_seq = {}
-    for seq_id, start, end, p in periodic:
+    for seq_id, start, end, p in sorted(periodic, key=lambda r: r[3]):  # shortest unit first
         by_seq.setdefault(seq_id, []).append((start, end, p))
 
-    kept = []
+    n = 0
     for call in calls:
-        if call["structure"] == "inverted_pair":
-            kept.append(call)
+        if call["structure"] not in ("tandem", "dispersed_pair"):
             continue
         d = _period(call)
         a, b = _extent(call)
-        multiple = False
         for start, end, p in by_seq.get(call["seq_id"], []):
-            if p >= d:
+            if not 0 < p < d:
                 continue
             k = round(d / p)
             tol = min(max(10, 0.05 * d), p / 4)
             if (k >= 2 and abs(d - k * p) <= tol
                     and start - p // 2 <= a and b <= end + p // 2):
-                multiple = True
+                call["structure"] = "unit_multiple"
+                call["unit"] = p
+                n += 1
                 break
-        if not multiple:
-            kept.append(call)
-    return kept, len(calls) - len(kept)
+    return n
 
 
 def _sides(call):
@@ -292,15 +291,16 @@ def _drop_same_pair(calls, slack=20):
     longer one stays. Copies of a family spaced evenly along the genome have
     the same period too, but their sides don't overlap.
     """
+    direct = ("tandem", "dispersed_pair")
     kept = []
     for call in sorted(calls, key=lambda c: _extent(c)[0] - _extent(c)[1]):
-        if call["structure"] != "inverted_pair":
+        if call["structure"] in direct:
             d = _period(call)
             one, two = _sides(call)
             same = False
             for other in kept:
                 if (other["seq_id"] != call["seq_id"]
-                        or other["structure"] == "inverted_pair"
+                        or other["structure"] not in direct
                         or abs(_period(other) - d) > slack):
                     continue
                 other_one, other_two = _sides(other)
@@ -322,11 +322,11 @@ def identify_tandem_duplications(alignments, seq_lengths, max_distance=50000,
     """Identify tandem duplications from NUCmer self-alignment results.
 
     Every hit is labelled `tandem` or `dispersed_pair` depending on the gap
-    between the copies, or `inverted_pair` when one copy is reversed. Only
-    tandems carry a junction; the pairs are kept because they are substrate
-    for rearrangement, but they are reported separately and are not
-    duplications. A pair aligned twice is reported once, and calls that are
-    only multiples of a shorter repeat unit are dropped.
+    between the copies, `inverted_pair` when one copy is reversed, or
+    `unit_multiple` when its period is a whole multiple of a shorter repeat
+    unit in the same region. Only tandems carry a junction; the rest are
+    reported separately and are not duplications. A pair aligned twice is
+    reported once.
 
     Short-duplication filters (applied to duplications below
     short_dup_threshold, default 500bp, when apply_short_dup_filters=True):
@@ -388,7 +388,11 @@ def identify_tandem_duplications(alignments, seq_lengths, max_distance=50000,
             overlap = min(pos1[1], pos2[1]) - max(pos1[0], pos2[0]) + 1
             first, second = (pos1, pos2) if pos1[0] <= pos2[0] else (pos2, pos1)
             period = second[0] - first[0]
-            periodic.append((aln["ref_id"], first[0], second[1], period))
+            # A repeat unit shifts both ends of the alignment by the same
+            # amount. One that starts on the diagonal and drifts off it
+            # through a low-complexity stretch says nothing about a unit.
+            if period >= 10 and abs(second[1] - first[1] - period) <= max(10, period // 10):
+                periodic.append((aln["ref_id"], first[0], second[1], period))
             n_array = _array_copy_number(aln["ref_alen"], period)
 
             if n_array >= 3 and period >= min_size:
@@ -479,12 +483,12 @@ def identify_tandem_duplications(alignments, seq_lengths, max_distance=50000,
             "detection_source": "native",
         })
 
-    tandems, n_multiples = _drop_period_multiples(tandems, periodic)
     tandems, n_twice = _drop_same_pair(tandems)
-    if n_multiples:
-        logger.info(f"  {n_multiples} call(s) dropped as multiples of a shorter repeat unit")
+    n_multiples = _mark_unit_multiples(tandems, periodic)
     if n_twice:
         logger.info(f"  {n_twice} call(s) dropped as the same pair aligned twice")
+    if n_multiples:
+        logger.info(f"  {n_multiples} call(s) are whole multiples of a shorter repeat unit")
 
     tandems.sort(key=lambda t: (t["seq_id"], t["copy1_start"]))
 
@@ -505,7 +509,8 @@ def identify_tandem_duplications(alignments, seq_lengths, max_distance=50000,
     logger.info(
         f"  {n['tandem']} tandem duplication candidate(s), "
         f"{n['dispersed_pair']} dispersed repeat pair(s) (gap > {max_tandem_gap}bp), "
-        f"{n['inverted_pair']} inverted pair(s)"
+        f"{n['inverted_pair']} inverted pair(s), "
+        f"{n['unit_multiple']} multiple(s) of a shorter unit"
     )
     return tandems
 
@@ -1112,8 +1117,10 @@ def run_module1(ref_fasta, output_dir, threads=1, max_distance=50000,
     # empty, so a rerun into the same folder can't leave an old one behind.
     dispersed = [t for t in tandems if t.get("structure") == "dispersed_pair"]
     inverted = [t for t in tandems if t.get("structure") == "inverted_pair"]
+    multiples = [t for t in tandems if t.get("structure") == "unit_multiple"]
     _save_pairs(dispersed, output_dir, "dispersed_pairs.tsv")
     _save_pairs(inverted, output_dir, "inverted_pairs.tsv")
+    _save_pairs(multiples, output_dir, "unit_multiples.tsv", extra=("unit",))
     if dispersed and not keep_dispersed:
         logger.info(
             f"  {len(dispersed)} dispersed pair(s) written to "
@@ -1121,6 +1128,8 @@ def run_module1(ref_fasta, output_dir, threads=1, max_distance=50000,
         )
     if inverted:
         logger.info(f"  {len(inverted)} inverted pair(s) written to inverted_pairs.tsv")
+    if multiples:
+        logger.info(f"  {len(multiples)} multiple(s) of a shorter unit written to unit_multiples.tsv")
 
     keep = {"tandem", None}
     if keep_dispersed:
@@ -1168,17 +1177,18 @@ def run_module1(ref_fasta, output_dir, threads=1, max_distance=50000,
     return classified
 
 
-def _save_pairs(pairs, output_dir, name):
+def _save_pairs(pairs, output_dir, name, extra=()):
     """Repeat pairs that are not tandem duplications.
 
     Direct copies too far apart are the substrate an unequal exchange acts
-    on; inverted copies are what an inversion needs. Neither is a duplication.
+    on; inverted copies are what an inversion needs. Neither is a duplication,
+    and nor is a multiple of a shorter unit inside an array.
     """
     path = os.path.join(output_dir, name)
     header = [
         "seq_id", "copy1_start", "copy1_end", "copy2_start", "copy2_end",
         "distance", "size", "identity", "orientation",
-        "repeat_loci", "dispersed_family",
+        "repeat_loci", "dispersed_family", *extra,
     ]
     with open(path, "w") as f:
         f.write("\t".join(header) + "\n")

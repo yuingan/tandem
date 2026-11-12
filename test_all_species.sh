@@ -62,6 +62,8 @@ echo "Tandem $VERSION module 1: ${#SPECIES_LIST[@]} species -> $OUT_BASE/"
 echo "============================================"
 echo ""
 
+# One genome failing shouldn't cost the others; failures are listed at the end.
+FAILED=()
 for sp in "${SPECIES_LIST[@]}"; do
     REF="$REF_DIR/$sp/${sp}.fna"
     OUTDIR="$OUT_BASE/$sp"
@@ -70,7 +72,10 @@ for sp in "${SPECIES_LIST[@]}"; do
     echo "Processing: $(disp "$sp") ($sp)"
     echo "--------------------------------------------"
 
-    tandem -r "$REF" -o "$OUTDIR" -t "$THREADS" -v
+    if ! tandem -r "$REF" -o "$OUTDIR" -t "$THREADS" -v; then
+        echo "FAILED: $sp" >&2
+        FAILED+=("$sp")
+    fi
 
     echo ""
 done
@@ -85,3 +90,9 @@ echo "Results in: $OUT_BASE/"
 echo "HTML reports: $OUT_BASE/*/tandem_report.html"
 echo "Compare with an earlier run:"
 echo "  python $HERE/tests/compare_module1.py OLD_RUN $OUT_BASE"
+
+if [ "${#FAILED[@]}" -gt 0 ]; then
+    echo ""
+    echo "FAILED: ${FAILED[*]}" >&2
+    exit 1
+fi
