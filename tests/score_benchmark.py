@@ -49,7 +49,7 @@ def main(truth_path, outdir):
     for t, c in hits:
         if c:
             size_ok = abs(int(c["size"]) - t["size"]) <= SLOP
-            copies_ok = int(c.get("copy_number", 2)) == t["copies"]
+            copies_ok = round(float(c.get("copy_number", 2))) == t["copies"]
             flags = "" if (size_ok and copies_ok) else "  <- size/copies wrong"
             print(f"    {t['size']:>6,}bp x{t['copies']} {t['identity']:>5}%  "
                   f"called {c['size']:>6}bp x{c.get('copy_number','?')} "

@@ -204,19 +204,89 @@ def _sequence_complexity_ok(seq, k=COMPLEXITY_KMER,
     return (len(kmers) / max_possible) >= min_fraction
 
 
-def _array_copy_number(align_len, period, tol=0.05):
-    """Copy number from a self-alignment offset by one unit.
+def _units(d, unit):
+    """How many units make period d, give or take indels; 0 if no whole number does."""
+    k = round(d / unit)
+    if k >= 1 and abs(d - k * unit) <= min(max(10, 0.05 * d), unit / 4):
+        return k
+    return 0
 
-    n copies of length p match over (n-1)p bases at offset p. Returns 0 when
-    the alignment is not a clean multiple of the period.
+
+def _array_regions(periodic, min_copies=2.5):
+    """Tandem arrays from the self-alignments whose two sides overlap.
+
+    Each entry (seq_id, start, end, period, identity) says start..end repeats
+    with that period. A degenerate array seldom aligns to itself in one piece
+    at its own period; the pieces at one, two, three... units cover it
+    between them. Entries that overlap, at whole numbers of one unit, are
+    merged into one region, shortest period first so the unit is the
+    shortest that explains it. Pieces of one array split by up to two units
+    of decayed sequence are joined. A region has to span min_copies units:
+    below that it is two copies with a little more alignment past the
+    junction, not an array.
     """
-    if period <= 0 or align_len < period:
-        return 0
-    units = align_len / period
-    n = round(units)
-    if n < 1 or abs(units - n) > tol:
-        return 0
-    return n + 1
+    regions = []
+    for seq_id, start, end, p, identity in sorted(periodic, key=lambda e: e[3]):
+        hits = [r for r in regions
+                if r["seq_id"] == seq_id and _units(p, r["unit"])
+                and start <= r["end"] + r["unit"] // 2
+                and r["start"] - r["unit"] // 2 <= end]
+        if not hits:
+            regions.append({"seq_id": seq_id, "start": start, "end": end,
+                            "unit": p, "identity": identity})
+            continue
+        keep = min(hits, key=lambda r: r["unit"])
+        for r in hits:
+            if r is not keep and _units(r["unit"], keep["unit"]):
+                keep["start"] = min(keep["start"], r["start"])
+                keep["end"] = max(keep["end"], r["end"])
+                if _units(r["unit"], keep["unit"]) == 1:
+                    keep["identity"] = max(keep["identity"], r["identity"])
+                regions.remove(r)
+        keep["start"] = min(keep["start"], start)
+        keep["end"] = max(keep["end"], end)
+        if _units(p, keep["unit"]) == 1:
+            keep["identity"] = max(keep["identity"], identity)
+
+    regions.sort(key=lambda r: (r["seq_id"], r["start"]))
+    joined = []
+    for r in regions:
+        last = joined[-1] if joined else None
+        if (last and last["seq_id"] == r["seq_id"]
+                and _units(r["unit"], last["unit"]) == 1
+                and r["start"] - last["end"] <= 2 * last["unit"]):
+            last["end"] = max(last["end"], r["end"])
+            last["identity"] = max(last["identity"], r["identity"])
+        else:
+            joined.append(r)
+    for r in joined:
+        r["copies"] = (r["end"] - r["start"] + 1) / r["unit"]
+    return [r for r in joined if r["copies"] >= min_copies]
+
+
+def _array_call(region):
+    """One call for a whole array, its first two units standing in as copies."""
+    start, unit = region["start"], region["unit"]
+    copies = round(region["copies"], 1)
+    if copies == int(copies):
+        copies = int(copies)
+    return {
+        "seq_id": region["seq_id"],
+        "copy1_start": start,
+        "copy1_end": start + unit - 1,
+        "copy2_start": start + unit,
+        "copy2_end": start + 2 * unit - 1,
+        "distance": 0,
+        "nucmer_overlap_bp": 0,
+        "circular_closer": False,
+        "size": unit,
+        "copy_number": copies,
+        "identity": region["identity"],
+        "orientation": "direct",
+        "structure": "tandem",
+        "distance_to_size_ratio": 0.0,
+        "detection_source": "native",
+    }
 
 
 def _period(call):
@@ -231,20 +301,19 @@ def _extent(call):
     return call["copy1_start"], call["copy2_end"]
 
 
-def _mark_unit_multiples(calls, periodic):
-    """Set aside calls that only restate a shorter repeat unit.
+def _mark_unit_multiples(calls, regions):
+    """Set aside pair calls that only restate an array.
 
-    In an array of six 113 bp units, the self-alignment offset by 226 bp
-    looks like a three-copy array and the one offset by 339 bp like a
-    two-copy tandem, though neither is a duplication of its own. periodic
-    holds (seq_id, start, end, period) for every direct self-alignment whose
-    two sides overlap by a clean shift, the unit too short to report
-    included. A call lying inside one of these regions, at a whole multiple
-    of its period, becomes a `unit_multiple` and records the unit.
+    Inside an array of six 113 bp units, the self-alignment offset by 339 bp
+    looks like a two-copy tandem, and a piece of the alignment at 113 bp
+    like another, though neither is a duplication of its own. A pair lying
+    inside an array region, at a whole number of its units, becomes a
+    `unit_multiple` and records the unit. Regions whose unit is too short to
+    report as an array still count.
     """
     by_seq = {}
-    for seq_id, start, end, p in sorted(periodic, key=lambda r: r[3]):  # shortest unit first
-        by_seq.setdefault(seq_id, []).append((start, end, p))
+    for r in sorted(regions, key=lambda r: r["unit"]):  # shortest unit first
+        by_seq.setdefault(r["seq_id"], []).append(r)
 
     n = 0
     for call in calls:
@@ -252,15 +321,11 @@ def _mark_unit_multiples(calls, periodic):
             continue
         d = _period(call)
         a, b = _extent(call)
-        for start, end, p in by_seq.get(call["seq_id"], []):
-            if not 0 < p < d:
-                continue
-            k = round(d / p)
-            tol = min(max(10, 0.05 * d), p / 4)
-            if (k >= 2 and abs(d - k * p) <= tol
-                    and start - p // 2 <= a and b <= end + p // 2):
+        for r in by_seq.get(call["seq_id"], []):
+            slack = r["unit"] // 2
+            if r["start"] - slack <= a and b <= r["end"] + slack and _units(d, r["unit"]):
                 call["structure"] = "unit_multiple"
-                call["unit"] = p
+                call["unit"] = r["unit"]
                 n += 1
                 break
     return n
@@ -370,7 +435,6 @@ def identify_tandem_duplications(alignments, seq_lengths, max_distance=50000,
 
         # Calculate distance and assign copy order
         nucmer_overlap_bp = 0
-        copies = 2
         unit_size = aln["ref_alen"]
 
         if pos1[1] < pos2[0]:
@@ -380,34 +444,26 @@ def identify_tandem_duplications(alignments, seq_lengths, max_distance=50000,
             linear_distance = pos1[0] - pos2[1] - 1
             copy1, copy2 = pos2, pos1
         else:
-            # Either a short junction overlap or an array: the two sides of an
-            # n-copy array overlap by (n-2) units, past the 10% tolerance.
+            # The two sides overlap. A little is the microhomology at a
+            # two-copy junction; more means the stretch repeats with this
+            # period, and arrays are built from those after the loop.
             # Reversed and overlapping is one stretch folding back on itself.
             if inverted:
                 continue
             overlap = min(pos1[1], pos2[1]) - max(pos1[0], pos2[0]) + 1
             first, second = (pos1, pos2) if pos1[0] <= pos2[0] else (pos2, pos1)
-            period = second[0] - first[0]
-            # A repeat unit shifts both ends of the alignment by the same
-            # amount. One that starts on the diagonal and drifts off it
-            # through a low-complexity stretch says nothing about a unit.
-            if period >= 10 and abs(second[1] - first[1] - period) <= max(10, period // 10):
-                periodic.append((aln["ref_id"], first[0], second[1], period))
-            n_array = _array_copy_number(aln["ref_alen"], period)
-
-            if n_array >= 3 and period >= min_size:
-                copies = n_array
-                unit_size = period
-                copy1 = [first[0], first[0] + period - 1]
-                copy2 = [first[0] + period, first[0] + 2 * period - 1]
-                linear_distance = 0
-            elif overlap <= aln["ref_alen"] * 0.1:
-                nucmer_overlap_bp = overlap
-                copy1, copy2 = list(first), list(second)
-                copy2[0] = copy1[1] + 1
-                linear_distance = 0
-            else:
+            if overlap > aln["ref_alen"] * 0.1:
+                period = second[0] - first[0]
+                # A repeat unit shifts both ends of the alignment by the same
+                # amount. One that starts on the diagonal and drifts off it
+                # through a low-complexity stretch says nothing about a unit.
+                if period >= 10 and abs(second[1] - first[1] - period) <= max(10, period // 10):
+                    periodic.append((aln["ref_id"], first[0], second[1], period, aln["identity"]))
                 continue
+            nucmer_overlap_bp = overlap
+            copy1, copy2 = list(first), list(second)
+            copy2[0] = copy1[1] + 1
+            linear_distance = 0
 
         # Circular distance: for circular genomes, the true distance
         # may be shorter going around the origin
@@ -475,7 +531,7 @@ def identify_tandem_duplications(alignments, seq_lengths, max_distance=50000,
             "nucmer_overlap_bp": nucmer_overlap_bp,
             "circular_closer": is_circular_closer,
             "size": unit_size,
-            "copy_number": copies,
+            "copy_number": 2,
             "identity": aln["identity"],
             "orientation": orientation,
             "structure": structure,
@@ -483,12 +539,28 @@ def identify_tandem_duplications(alignments, seq_lengths, max_distance=50000,
             "detection_source": "native",
         })
 
+    regions = _array_regions(periodic)
     tandems, n_twice = _drop_same_pair(tandems)
-    n_multiples = _mark_unit_multiples(tandems, periodic)
+    n_multiples = _mark_unit_multiples(tandems, regions)
+
+    n_arrays = 0
+    for r in regions:
+        if r["unit"] < min_size:
+            continue
+        if apply_short_dup_filters and r["unit"] < short_dup_threshold and sequences is not None:
+            ref = sequences.get(r["seq_id"], "")
+            if ref and not _sequence_complexity_ok(ref[r["start"] - 1:r["start"] - 1 + r["unit"]]):
+                n_filtered_by_complexity += 1
+                continue
+        tandems.append(_array_call(r))
+        n_arrays += 1
+
     if n_twice:
         logger.info(f"  {n_twice} call(s) dropped as the same pair aligned twice")
+    if n_arrays:
+        logger.info(f"  {n_arrays} tandem array(s)")
     if n_multiples:
-        logger.info(f"  {n_multiples} call(s) are whole multiples of a shorter repeat unit")
+        logger.info(f"  {n_multiples} call(s) are whole multiples of an array's unit")
 
     tandems.sort(key=lambda t: (t["seq_id"], t["copy1_start"]))
 
@@ -595,7 +667,7 @@ def describe_junctions(tandems, sequences, flag_distance=2000,
         # dispersed pair has no junction.
         if td.get("structure", "tandem") != "tandem":
             td["architecture"] = "dispersed_pair"
-        elif td.get("copy_number", 2) >= 3:
+        elif td.get("copy_number", 2) > 2:
             td["architecture"] = "array"
         elif td["flanking_repeat"]:
             td["architecture"] = "flanking_repeat"

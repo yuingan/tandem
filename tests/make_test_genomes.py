@@ -99,6 +99,21 @@ def build():
         "array of a 113bp unit, below --min-size 200",
     )
 
+    # Nine copies of a 240bp unit and half of a tenth, each 3.5% diverged.
+    # Real arrays end in a partial unit; this one used to go unreported.
+    unit240 = rand_seq(240)
+    copies = []
+    for _ in range(10):
+        c = list(unit240)
+        for pos in random.sample(range(240), 8):
+            c[pos] = random.choice("ACGT".replace(c[pos], ""))
+        copies.append("".join(c))
+    copies[-1] = copies[-1][:130]
+    cases["array_partial_240"] = (
+        backbone[:20000] + "".join(copies) + backbone[20000:],
+        "array of a 240bp unit, 9.5 copies",
+    )
+
     return cases
 
 

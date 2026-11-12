@@ -19,7 +19,7 @@ python "$here/make_benchmark_genome.py" "$data" > /dev/null
 echo "Module 1: single-feature genomes"
 echo "--------------------------------"
 for g in tandem_2x tandem_3x is_pair_30kb is_family_6x tandem_diverged tandem_short_150 \
-         inverted_pair array_unit_113; do
+         inverted_pair array_unit_113 array_partial_240; do
     out="$work/$g"
     tandem -r "$data/$g.fna" -o "$out" -t 1 > /dev/null 2>&1
     n_tandem=$(($(wc -l < "$out/tandem_duplications.tsv") - 1))
