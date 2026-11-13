@@ -20,10 +20,15 @@ Next to a repeat the two counts still lose different shares of their reads,
 so each is divided by the number of read placements the scan could have
 counted at that spot, worked out from the reference (_countable). The
 uncorrected ratio is kept as dosage_raw.
+
+dosage_low and dosage_high bound a 95% interval: for the junction ratio from
+the two counts, for depth from how much the same depth statistic moves where
+nothing is duplicated.
 """
 
 import gzip
 import logging
+import math
 import multiprocessing
 import time
 from collections import deque
@@ -217,13 +222,19 @@ def scan(ref_seq, read_paths, k=ANCHOR_K, stride=STRIDE,
 
         raw = support / ref_count if ref_count else None
         fixed = raw * can_r / can_j if raw is not None and can_j else None
-        from_depth = _depth_dosage(depth, start0, end0)
+        from_depth, noise = _depth_dosage(depth, start0, end0)
         # When no read can be placed on both sides of the junction (one end of
         # the unit inside a repeat longer than a read) or of the reference
         # boundary, the reads can't give a ratio; coverage still can.
-        dosage, source = fixed, "junction"
-        if fixed is None:
-            dosage, source = from_depth, ("depth" if from_depth is not None else "")
+        dosage, source, low, high = fixed, "junction", None, None
+        if fixed is not None:
+            low, high = (x * can_r / can_j for x in _ratio_interval(support, ref_count))
+        elif from_depth is not None:
+            dosage, source = from_depth, "depth"
+            if noise is not None:
+                low, high = from_depth - 2 * noise, from_depth + 2 * noise
+        else:
+            source = ""
         return {
             "start": start0 + 1,
             "end": end0 + 1,
@@ -231,12 +242,15 @@ def scan(ref_seq, read_paths, k=ANCHOR_K, stride=STRIDE,
             "microhomology": mh,
             "junction_reads": int(support),
             "reference_reads": int(ref_count),
-            "dosage": round(dosage, 4) if dosage is not None else None,
+            "dosage": _round(dosage),
             "dosage_from": source,
-            "dosage_raw": round(raw, 4) if raw is not None else None,
+            "dosage_low": _round(low),
+            "dosage_high": _round(high),
+            "dosage_raw": _round(raw),
             "junction_visible": round(can_j / most, 3),
             "reference_visible": round(can_r / most, 3),
             "depth_dosage": from_depth,
+            "depth_noise": noise,
         }
 
     if targets is not None:
@@ -359,25 +373,62 @@ def _homology(start0, end0, ref):
     return n
 
 
-def _depth_dosage(depth, start0, end0):
-    """Same quantity as the junction ratio, from coverage instead.
+def _round(x, digits=4):
+    if x is None:
+        return None
+    return round(x, digits) if math.isfinite(x) else x
+
+
+def _ratio_interval(j, r, z=1.96):
+    """95% interval for j/r, from a Wilson interval on j's share of j + r."""
+    n = j + r
+    p = j / n
+    centre = (p + z * z / (2 * n)) / (1 + z * z / n)
+    half = z * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n)) / (1 + z * z / n)
+    lo = 0.0 if j == 0 else max(0.0, centre - half)
+    hi = min(1.0, centre + half)
+    return lo / (1 - lo), (hi / (1 - hi) if hi < 1 else math.inf)
+
+
+def _depth_dosage(depth, start0, end0, windows=10, longest=50_000):
+    """Same quantity as the junction ratio, from coverage instead, and its noise.
 
     Depth inside a duplicated interval is 1 + f(n-1) times the depth outside,
-    so the two estimates should agree.
+    so the two estimates should agree. The noise is how far the same statistic
+    strays where nothing is duplicated: unit-sized windows are laid end to end
+    beyond the baseline, up to `windows` on each side, and each is set against
+    its two neighbours as the unit is against its flanks.
     """
     span = end0 - start0 + 1
     margin = 200                    # step off the junction before sampling
     inside = depth[start0 + margin:end0 + 1 - margin]
-    left = depth[max(0, start0 - span - margin):max(0, start0 - margin)]
-    right = depth[end0 + 1 + margin:end0 + 1 + margin + span]
+    left_from = max(0, start0 - span - margin)
+    right_to = end0 + 1 + margin + span
+    left = depth[left_from:max(0, start0 - margin)]
+    right = depth[end0 + 1 + margin:right_to]
     outside = np.concatenate([left, right])
     if len(inside) < margin or len(outside) < margin:
-        return None
+        return None, None
     # median, not mean: repeats in either window drop to zero depth
     base = float(np.median(outside))
     if base == 0:
-        return None
-    return round(float(np.median(inside)) / base - 1.0, 4)
+        return None, None
+    dosage = round(float(np.median(inside)) / base - 1.0, 4)
+
+    w = min(len(inside), longest)
+    null = []
+    for starts in ([left_from - (k + 1) * w for k in range(windows)],
+                   [right_to + k * w for k in range(windows)]):
+        tiles = [depth[a:a + w] for a in starts if 0 <= a and a + w <= len(depth)]
+        for prev, tile, nxt in zip(tiles, tiles[1:], tiles[2:]):
+            flank = float(np.median(np.concatenate([prev, nxt])))
+            if flank > 0:
+                null.append(float(np.median(tile)) / flank - 1.0)
+    if len(null) < 5:
+        return dosage, None
+    # robust spread: another duplication among the windows shouldn't count
+    mad = float(np.median(np.abs(np.array(null) - np.median(null))))
+    return dosage, round(1.4826 * mad, 4)
 
 
 def _uniqueness(ref_seq, index, k, windows):

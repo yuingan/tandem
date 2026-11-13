@@ -96,6 +96,13 @@ def _num(value, digits=4, percent=False):
     return f"{value:.0%}" if percent else f"{value:.{digits}f}"
 
 
+def _interval(r, digits=3):
+    low, high = r.get("dosage_low"), r.get("dosage_high")
+    if low is None or high is None or low == "" or high == "":
+        return "–"
+    return f"{_num(low, digits)}–{_num(high, digits)}"
+
+
 def _item(label, value):
     return f"""
                 <div class="detail-item">
@@ -326,6 +333,7 @@ def _build_module2_table(results):
             f"<td>{r['junction_reads']}</td>",
             f"<td>{r['reference_reads']}</td>",
             f"<td>{_num(r.get('dosage'), 3)}</td>",
+            f"<td>{_interval(r)}</td>",
             f"<td>{r.get('dosage_from', '')}</td>",
             f"<td>{_num(r.get('depth_dosage'), 3)}</td>",
         ]
@@ -339,7 +347,7 @@ def _build_module2_table(results):
 
     headers = ["#", "Sequence"] + (["Given"] if given else []) + [
         "Start", "End", "Size", "Microhomology", "Junction Reads",
-        "Reference Reads", "Dosage", "From", "Depth Estimate",
+        "Reference Reads", "Dosage", "95% Interval", "From", "Depth Estimate",
     ] + (["Control Reads"] if control else [])
     header_html = "".join("<th>" + h + "</th>" for h in headers)
 
@@ -371,8 +379,10 @@ def _build_module2_details(results):
             _item("Junction reads", r["junction_reads"]),
             _item("Reference reads", r["reference_reads"]),
             _item("Dosage", f"{_num(r.get('dosage'))} (from {r.get('dosage_from') or '–'})"),
+            _item("95% interval", _interval(r, 4)),
             _item("Dosage before correction", _num(r.get("dosage_raw"))),
-            _item("Dosage from depth", _num(r.get("depth_dosage"))),
+            _item("Dosage from depth", f"{_num(r.get('depth_dosage'))} "
+                                       f"(noise {_num(r.get('depth_noise'))})"),
             _item("Junction countable", _num(r.get("junction_visible"), percent=True)),
             _item("Reference countable", _num(r.get("reference_visible"), percent=True)),
         ]
@@ -505,6 +515,7 @@ def _build_module3_table(results):
         dosage = r.get("dosage")
         level = dosage or 0
         dosage_class = "jrr-high" if level > 0.1 else "jrr-med" if level > 0.01 else "jrr-low"
+        interval = _interval(r, 4)
 
         rows.append(f"""
         <tr class="clickable-row" data-target="detail-{i}">
@@ -517,6 +528,7 @@ def _build_module3_table(results):
             <td>{r.get('junction_reads', 0)}</td>
             <td>{r.get('reference_reads', 0)}</td>
             <td class="{dosage_class}">{_num(dosage)}</td>
+            <td>{interval}</td>
             <td>{r.get('dosage_from', '')}</td>
             <td>{_num(r.get('depth_dosage'))}</td>
         </tr>""")
@@ -541,6 +553,7 @@ def _build_module3_table(results):
                 <th>Junction Reads</th>
                 <th>Reference Reads</th>
                 <th>Dosage</th>
+                <th>95% Interval</th>
                 <th>From</th>
                 <th>Depth Estimate</th>
             </tr>
@@ -565,8 +578,10 @@ def _build_module3_details(results):
             _item("Duplication size", f"{r.get('dup_size', 0):,} bp"),
             _item("Junction reads", r.get("junction_reads", 0)),
             _item("Reference reads", r.get("reference_reads", 0)),
+            _item("95% interval", _interval(r, 4)),
             _item("Dosage before correction", _num(r.get("dosage_raw"))),
-            _item("Dosage from depth", _num(r.get("depth_dosage"))),
+            _item("Dosage from depth", f"{_num(r.get('depth_dosage'))} "
+                                       f"(noise {_num(r.get('depth_noise'))})"),
             _item("Junction countable", _num(r.get("junction_visible"), percent=True)),
             _item("Microhomology", f"{r.get('microhomology_bp', 0)} bp"),
             _item("Flanking repeat", f"{r.get('repeat_len', 0)} bp" if r.get("flanking_repeat") else "none"),

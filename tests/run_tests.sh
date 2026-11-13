@@ -59,4 +59,9 @@ echo "Module 2: junction scan on simulated reads"
 echo "-----------------------------------------"
 python "$here/check_scan.py" "$work/scan" || status=1
 
+echo
+echo "Benchmark helpers"
+echo "-----------------"
+python "$here/breseq_junctions.py" check || status=1
+
 exit $status

@@ -594,7 +594,8 @@ def run_scan(ref_fasta, read1, read2=None, output_dir=".",
 
     columns = ["seq_id", "start", "end", "size", "microhomology",
                "junction_reads", "reference_reads", "dosage", "dosage_from",
-               "dosage_raw", "junction_visible", "reference_visible", "depth_dosage"]
+               "dosage_low", "dosage_high", "dosage_raw", "junction_visible",
+               "reference_visible", "depth_dosage", "depth_noise"]
     if starts:
         columns[1:1] = ["provided_start", "provided_end"]
     if control:
@@ -614,8 +615,8 @@ def run_scan(ref_fasta, read1, read2=None, output_dir=".",
         logger.info(
             f"  {r['seq_id']}:{r['start']:,}-{r['end']:,}{given}  {r['size']:,}bp  "
             f"junction={r['junction_reads']} reference={r['reference_reads']}  "
-            f"dosage={r['dosage']} from {r['dosage_from']} (junction visible "
-            f"{r['junction_visible']})  depth={r['depth_dosage']}{note}"
+            f"dosage={r['dosage']} ({r['dosage_low']}-{r['dosage_high']}) from "
+            f"{r['dosage_from']}  depth={r['depth_dosage']}{note}"
         )
     logger.info(f"  Results saved to {path}")
     return results

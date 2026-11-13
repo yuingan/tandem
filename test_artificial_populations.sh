@@ -6,6 +6,8 @@
 #
 # Every species folder under ART_DIR with a ground_truth.json is run, one
 # tandem -pop per day_<d> folder, which holds the reads and metadata.tsv.
+# Each population is also scanned with -iso, with no coordinates, to see which
+# duplications are found without being named (SCAN=0 skips this).
 # The reference is the .fna under REF_DIR/<species>*/. Results go to
 # module3_v<version>_benchmark/, named after the installed tandem so an old
 # run is never overwritten.
@@ -57,6 +59,17 @@ for gt in "$ART_DIR"/*/ground_truth.json; do
         else
             echo "  day $day: FAILED, see $log" >&2
             FAILED+=("${species}_day${day}")
+        fi
+
+        [ "${SCAN:-1}" = 1 ] || continue
+        log="$OUT/logs/${species}_day${day}_scan.log"
+        SECONDS=0
+        if tandem -r "$ref" -i "${r1[0]}" "${pair[@]}" -iso -t "$THREADS" \
+                -o "$OUT/${species}_day${day}_scan" > "$log" 2>&1; then
+            echo "  day $day: scan done in ${SECONDS}s"
+        else
+            echo "  day $day: scan FAILED, see $log" >&2
+            FAILED+=("${species}_day${day}_scan")
         fi
     done
 done

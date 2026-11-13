@@ -27,8 +27,9 @@ logger = logging.getLogger("tandem")
 COLUMNS = [
     "name", "seq_id", "provided_start", "provided_end",
     "dup_start", "dup_end", "dup_size",
-    "junction_reads", "reference_reads", "dosage", "dosage_from", "dosage_raw",
-    "junction_visible", "reference_visible", "depth_dosage",
+    "junction_reads", "reference_reads", "dosage", "dosage_from",
+    "dosage_low", "dosage_high", "dosage_raw",
+    "junction_visible", "reference_visible", "depth_dosage", "depth_noise",
     "flanking_repeat", "repeat_len", "repeat_identity",
     "microhomology_bp", "microhomology_seq",
 ]
@@ -94,10 +95,13 @@ def run_module3(ref_fasta, read1, read2=None, metadata_path=None,
             "reference_reads": hit["reference_reads"],
             "dosage": hit["dosage"],
             "dosage_from": hit["dosage_from"],
+            "dosage_low": hit["dosage_low"],
+            "dosage_high": hit["dosage_high"],
             "dosage_raw": hit["dosage_raw"],
             "junction_visible": hit["junction_visible"],
             "reference_visible": hit["reference_visible"],
             "depth_dosage": hit["depth_dosage"],
+            "depth_noise": hit["depth_noise"],
             "flanking_repeat": junction["flanking_repeat"],
             "repeat_len": junction["repeat_len"],
             "repeat_identity": junction["repeat_identity"],
@@ -112,7 +116,8 @@ def run_module3(ref_fasta, read1, read2=None, metadata_path=None,
         logger.info(
             f"  {r['name']}: {r['dup_start']:,}-{r['dup_end']:,}{moved}  "
             f"junction={r['junction_reads']} reference={r['reference_reads']}  "
-            f"dosage={r['dosage']} from {r['dosage_from']}  depth={r['depth_dosage']}"
+            f"dosage={r['dosage']} ({r['dosage_low']}-{r['dosage_high']}) from "
+            f"{r['dosage_from']}  depth={r['depth_dosage']}"
         )
 
     _save_results(results, output_dir)
@@ -125,7 +130,7 @@ def _save_results(results, output_dir):
         f.write("# dosage = junction reads / reference reads, each corrected for the read\n")
         f.write("# placements the scan can count there: f(n-1), extra copies per cell.\n")
         f.write("# Where no read can be placed across the junction, dosage is from depth\n")
-        f.write("# (dosage_from).\n")
+        f.write("# (dosage_from). dosage_low and dosage_high bound a 95% interval.\n")
         f.write("\t".join(COLUMNS) + "\n")
         for r in results:
             f.write("\t".join("" if r.get(c) is None else str(r.get(c)) for c in COLUMNS) + "\n")
@@ -141,7 +146,7 @@ def _save_results(results, output_dir):
                 "Estimates f(n-1), the extra copies per cell; for a duplication "
                 "adding one copy, the share of cells that carry it. Where no read "
                 "can be placed across the junction, the estimate is from depth "
-                "(dosage_from)."
+                "(dosage_from). dosage_low and dosage_high bound a 95% interval."
             ),
             "results": results,
         }, f, indent=2)

@@ -210,6 +210,20 @@ def main(work):
     detail = (f"junction visible {r['junction_visible']}, dosage {r['dosage']} from "
               f"{r['dosage_from']} (truth 0.5)") if r else "no row"
     results.append(("junction inside a repeat: depth instead", ok, detail))
+    hidden = r
+
+    # 9. Every estimate comes with an interval around it: from the read counts
+    #    for a junction (from 0 where no read crosses it), from the noise of
+    #    depth where the dosage comes from depth.
+    def spans(row):
+        return (row is not None and row["dosage_low"] != "" and row["dosage_high"] != ""
+                and float(row["dosage_low"]) <= float(row["dosage"]) <= float(row["dosage_high"]))
+    ok = (spans(given) and spans(absent) and float(absent["dosage_low"]) == 0
+          and float(absent["dosage_high"]) > 0 and spans(hidden)
+          and float(hidden["depth_noise"]) > 0)
+    detail = (f"{given['dosage_low']}-{given['dosage_high']} around {given['dosage']}; "
+              f"depth noise {hidden['depth_noise']}") if given and hidden else "missing rows"
+    results.append(("intervals around the estimates", ok, detail))
 
     failed = 0
     for name, ok, detail in results:

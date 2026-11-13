@@ -2,13 +2,13 @@
 """Score Module 3 on the artificial populations against their ground truth.
 
     python tests/score_artificial_populations.py --gt-dir genome/artificial_pop_seqs \
-        --results-dir module3_v0.4.0.dev12_benchmark
+        --results-dir module3_v0.4.0.dev13_benchmark
 
 Reads <gt-dir>/<species>/ground_truth.json and every
 <results-dir>/<species>_day<d>/junction_quantification.tsv. Output from
-v0.3.0, which has a JRR column instead of dosage, is scored the same way, so
-an old and a new run can be set side by side. All points go to
-<results-dir>/scatter_data.tsv.
+v0.3.0, which has a JRR column instead of dosage, is scored the same way, and
+so is breseq output converted by tests/breseq_junctions.py, so runs can be set
+side by side. All points go to <results-dir>/scatter_data.tsv.
 
 The truth is each mutant's share of the genomes in the simulated reads. The
 generator gives the wild type coverage x (1 - sum of mutant frequencies),
@@ -25,6 +25,10 @@ Per species, per mechanism and overall:
               over every point where the mutant is present
   R2          of a straight line with an intercept, same points
   absent      the largest estimate where the mutant is not in the population
+
+Then, where the output has them: how often the 95% interval holds the truth,
+and which duplications were found without being named, from a scan of the
+same reads (<species>_day<d>_scan/junctions.tsv) or breseq's own calls.
 """
 
 import argparse
@@ -32,6 +36,8 @@ import csv
 import json
 import os
 import sys
+
+MATCH = 25      # bp; a found junction this close to the true one at both ends is it
 
 
 def number(value):
@@ -52,14 +58,27 @@ def read_results(path):
             "source": source if estimate is not None else "",
             "junction": estimate if source in ("junction", "JRR") else None,
             "depth": number(r.get("depth_dosage")),
+            "low": number(r.get("dosage_low")),
+            "high": number(r.get("dosage_high")),
+            "called": number(r.get("called")),
             "junction_reads": r.get("junction_reads", r.get("spanning_reads", "")),
             "reference_reads": r.get("reference_reads", ""),
         }
     return out, column
 
 
+def read_scan(path):
+    with open(path) as f:
+        return [(int(r["start"]), int(r["end"]), int(r["junction_reads"]))
+                for r in csv.DictReader(f, delimiter="\t")]
+
+
+def found(scan, start, end):
+    return any(abs(s - start) <= MATCH and abs(e - end) <= MATCH for s, e, _ in scan)
+
+
 def load_points(gt_dir, results_dir, labels_as_written=False):
-    points, columns, missing = [], set(), []
+    points, columns, missing, unmatched = [], set(), [], 0
     for species in sorted(os.listdir(gt_dir)):
         gt_path = os.path.join(gt_dir, species, "ground_truth.json")
         if not os.path.isfile(gt_path):
@@ -69,16 +88,26 @@ def load_points(gt_dir, results_dir, labels_as_written=False):
         days = sorted({int(k.split("_")[1]) for t in truth for k in t["frequencies"]})
         for day in days:
             label = {t["mutant_id"]: float(t["frequencies"].get(f"day_{day}", 0)) for t in truth}
-            total = sum(label.values())
-            scale = 1.0 if labels_as_written else max(1.0, total)
-            tsv = os.path.join(results_dir, f"{species}_day{day}", "junction_quantification.tsv")
+            scale = 1.0 if labels_as_written else max(1.0, sum(label.values()))
+            run = os.path.join(results_dir, f"{species}_day{day}")
+            tsv = os.path.join(run, "junction_quantification.tsv")
             if not os.path.isfile(tsv):
                 missing.append(f"{species}_day{day}")
                 continue
             results, column = read_results(tsv)
             columns.add(column)
+            scan_path = os.path.join(run + "_scan", "junctions.tsv")
+            scan = read_scan(scan_path) if os.path.isfile(scan_path) else None
+            if scan is not None:
+                unmatched += sum(1 for s, e, _ in scan
+                                 if not any(abs(s - t.get("dup_start", -10**9)) <= MATCH
+                                            and abs(e - t.get("dup_end", -10**9)) <= MATCH
+                                            for t in truth))
             for t in truth:
                 r = results.get(t["mutant_id"], {})
+                called = r.get("called")
+                if scan is not None and "dup_start" in t:
+                    called = float(found(scan, t["dup_start"], t["dup_end"]))
                 points.append({
                     "species": species,
                     "mutant_id": t["mutant_id"],
@@ -91,15 +120,18 @@ def load_points(gt_dir, results_dir, labels_as_written=False):
                     "source": r.get("source", ""),
                     "junction": r.get("junction"),
                     "depth": r.get("depth"),
+                    "low": r.get("low"),
+                    "high": r.get("high"),
+                    "called": called,
                     "junction_reads": r.get("junction_reads", ""),
                     "reference_reads": r.get("reference_reads", ""),
                 })
-    return points, columns, missing
+    return points, columns, missing, unmatched
 
 
 def summarise(points, key="estimate"):
     present = [p for p in points if p["true"] > 0.01]
-    found = sum(1 for p in present if (p[key] or 0) > 0.01)
+    found_ = sum(1 for p in present if (p[key] or 0) > 0.01)
     mae = (sum(abs((p[key] or 0) - p["true"]) for p in present) / len(present)
            if present else None)
 
@@ -120,7 +152,7 @@ def summarise(points, key="estimate"):
     unmeasured = sum(1 for p in points if p[key] is None)
     return {
         "points": len(points),
-        "recall": f"{found}/{len(present)}",
+        "recall": f"{found_}/{len(present)}",
         "mae": mae,
         "slope": slope,
         "r2": r2,
@@ -143,6 +175,40 @@ def print_table(groups, key="estimate"):
               f"{fmt(s['absent_max'], '.3f'):>11} {s['unmeasured']:>11}")
 
 
+BANDS = [("absent", lambda x: x == 0), ("up to 5%", lambda x: 0 < x <= 0.05),
+         ("5-15%", lambda x: 0.05 < x <= 0.15), ("above 15%", lambda x: x > 0.15)]
+
+
+def print_intervals(points):
+    rows = [p for p in points if p["low"] is not None and p["high"] is not None]
+    if not rows:
+        return
+    print()
+    print("95% intervals:")
+    for source in sorted({p["source"] for p in rows}):
+        mine = [p for p in rows if p["source"] == source]
+        present = [p for p in mine if p["true"] > 0]
+        held = sum(1 for p in present if p["low"] <= p["true"] <= p["high"])
+        absent = [p for p in mine if p["true"] == 0]
+        above = sum(1 for p in absent if p["low"] > 0)
+        print(f"  from {source:<9} hold the true share at {held}/{len(present)} present points; "
+              f"exclude 0 at {above}/{len(absent)} absent points")
+
+
+def print_detection(points, unmatched):
+    rows = [p for p in points if p["called"] is not None]
+    if not rows:
+        return
+    print()
+    print("Found without being named:")
+    for name, test in BANDS:
+        band = [p for p in rows if test(p["true"])]
+        if band:
+            print(f"  {name:<10} {sum(1 for p in band if p['called']):>4}/{len(band)}")
+    if unmatched:
+        print(f"  {unmatched} other junction(s) reported that match no mutant")
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--gt-dir", default="genome/artificial_pop_seqs")
@@ -151,8 +217,8 @@ def main():
                     help="score against the frequencies as written, not the shares simulated")
     args = ap.parse_args()
 
-    points, columns, missing = load_points(args.gt_dir, args.results_dir,
-                                           args.labels_as_written)
+    points, columns, missing, unmatched = load_points(args.gt_dir, args.results_dir,
+                                                      args.labels_as_written)
     if not points:
         sys.exit(f"No results found under {args.results_dir}")
     print(f"Scored column: {', '.join(sorted(columns))}")
@@ -192,6 +258,9 @@ def main():
     print_table([(f"day {d}", [p for p in points if p["day"] == d])
                  for d in sorted({p["day"] for p in points})])
 
+    print_intervals(points)
+    print_detection(points, unmatched)
+
     print()
     print("recall and MAE over points truly above 1%; slope (through the origin) and R2")
     print("over every point where the mutant is present; 'absent max' is the largest")
@@ -199,7 +268,8 @@ def main():
 
     out = os.path.join(args.results_dir, "scatter_data.tsv")
     fields = ["species", "mutant_id", "mechanism", "dup_size", "day", "label", "true",
-              "estimate", "source", "junction_reads", "reference_reads", "depth"]
+              "estimate", "low", "high", "source", "called", "junction_reads",
+              "reference_reads", "depth"]
     with open(out, "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=fields, delimiter="\t", extrasaction="ignore")
         w.writeheader()
