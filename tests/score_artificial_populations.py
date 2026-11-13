@@ -2,7 +2,7 @@
 """Score Module 3 on the artificial populations against their ground truth.
 
     python tests/score_artificial_populations.py --gt-dir genome/artificial_pop_seqs \
-        --results-dir module3_v0.4.0.dev13_benchmark
+        --results-dir module3_v0.4.0.dev15_benchmark
 
 Reads <gt-dir>/<species>/ground_truth.json and every
 <results-dir>/<species>_day<d>/junction_quantification.tsv. Output from
@@ -26,9 +26,15 @@ Per species, per mechanism and overall:
   R2          of a straight line with an intercept, same points
   absent      the largest estimate where the mutant is not in the population
 
+The junction and depth estimates are also scored on their own, and side by
+side on the points where both exist, since a junction with no readable read
+counts as 0 in the junction-only row.
+
 Then, where the output has them: how often the 95% interval holds the truth,
-and which duplications were found without being named, from a scan of the
-same reads (<species>_day<d>_scan/junctions.tsv) or breseq's own calls.
+for the estimate reported and for depth +/- 2 noise at every point; and which
+duplications were found without being named, from a scan of the same reads
+(<species>_day<d>_scan/junctions.tsv) or breseq's own calls, with any
+junction found that matches no mutant listed.
 """
 
 import argparse
@@ -58,6 +64,7 @@ def read_results(path):
             "source": source if estimate is not None else "",
             "junction": estimate if source in ("junction", "JRR") else None,
             "depth": number(r.get("depth_dosage")),
+            "depth_noise": number(r.get("depth_noise")),
             "low": number(r.get("dosage_low")),
             "high": number(r.get("dosage_high")),
             "called": number(r.get("called")),
@@ -77,8 +84,15 @@ def found(scan, start, end):
     return any(abs(s - start) <= MATCH and abs(e - end) <= MATCH for s, e, _ in scan)
 
 
+def offset(t, start, end):
+    """How far a junction is from mutant t, as the worse of its two ends."""
+    if "dup_start" not in t:
+        return float("inf")
+    return max(abs(start - t["dup_start"]), abs(end - t["dup_end"]))
+
+
 def load_points(gt_dir, results_dir, labels_as_written=False):
-    points, columns, missing, unmatched = [], set(), [], 0
+    points, columns, missing, unmatched = [], set(), [], []
     for species in sorted(os.listdir(gt_dir)):
         gt_path = os.path.join(gt_dir, species, "ground_truth.json")
         if not os.path.isfile(gt_path):
@@ -98,11 +112,10 @@ def load_points(gt_dir, results_dir, labels_as_written=False):
             columns.add(column)
             scan_path = os.path.join(run + "_scan", "junctions.tsv")
             scan = read_scan(scan_path) if os.path.isfile(scan_path) else None
-            if scan is not None:
-                unmatched += sum(1 for s, e, _ in scan
-                                 if not any(abs(s - t.get("dup_start", -10**9)) <= MATCH
-                                            and abs(e - t.get("dup_end", -10**9)) <= MATCH
-                                            for t in truth))
+            for s, e, n in scan or []:
+                nearest = min(truth, key=lambda t: offset(t, s, e))
+                if offset(nearest, s, e) > MATCH:
+                    unmatched.append((species, day, s, e, n, nearest))
             for t in truth:
                 r = results.get(t["mutant_id"], {})
                 called = r.get("called")
@@ -120,6 +133,7 @@ def load_points(gt_dir, results_dir, labels_as_written=False):
                     "source": r.get("source", ""),
                     "junction": r.get("junction"),
                     "depth": r.get("depth"),
+                    "depth_noise": r.get("depth_noise"),
                     "low": r.get("low"),
                     "high": r.get("high"),
                     "called": called,
@@ -165,9 +179,10 @@ def fmt(value, spec):
     return "-" if value is None else format(value, spec)
 
 
-def print_table(groups, key="estimate"):
-    print(f"{'':<26} {'points':>7} {'recall':>9} {'MAE':>8} {'slope':>7} "
-          f"{'R2':>6} {'absent max':>11} {'unmeasured':>11}")
+def print_table(groups, key="estimate", header=True):
+    if header:
+        print(f"{'':<26} {'points':>7} {'recall':>9} {'MAE':>8} {'slope':>7} "
+              f"{'R2':>6} {'absent max':>11} {'unmeasured':>11}")
     for name, pts in groups:
         s = summarise(pts, key)
         print(f"{name:<26} {s['points']:>7} {s['recall']:>9} {fmt(s['mae'], '.4f'):>8} "
@@ -181,18 +196,26 @@ BANDS = [("absent", lambda x: x == 0), ("up to 5%", lambda x: 0 < x <= 0.05),
 
 def print_intervals(points):
     rows = [p for p in points if p["low"] is not None and p["high"] is not None]
-    if not rows:
+    depth = [dict(p, low=p["depth"] - 2 * p["depth_noise"], high=p["depth"] + 2 * p["depth_noise"])
+             for p in points if p["depth"] is not None and p["depth_noise"] is not None]
+    if not rows and not depth:
         return
     print()
     print("95% intervals:")
-    for source in sorted({p["source"] for p in rows}):
-        mine = [p for p in rows if p["source"] == source]
+    groups = [(f"from {s}", [p for p in rows if p["source"] == s])
+              for s in sorted({p["source"] for p in rows})]
+    if depth:
+        groups.append(("depth at every point", depth))
+    width = max(len(name) for name, _ in groups)
+    for name, mine in groups:
         present = [p for p in mine if p["true"] > 0]
         held = sum(1 for p in present if p["low"] <= p["true"] <= p["high"])
         absent = [p for p in mine if p["true"] == 0]
         above = sum(1 for p in absent if p["low"] > 0)
-        print(f"  from {source:<9} hold the true share at {held}/{len(present)} present points; "
+        print(f"  {name:<{width}}  hold the true share at {held}/{len(present)} present points; "
               f"exclude 0 at {above}/{len(absent)} absent points")
+    if depth:
+        print("  (depth intervals are depth +/- 2 noise)")
 
 
 def print_detection(points, unmatched):
@@ -206,7 +229,11 @@ def print_detection(points, unmatched):
         if band:
             print(f"  {name:<10} {sum(1 for p in band if p['called']):>4}/{len(band)}")
     if unmatched:
-        print(f"  {unmatched} other junction(s) reported that match no mutant")
+        print(f"  {len(unmatched)} other junction(s) reported that match no mutant:")
+        for species, day, start, end, reads, t in unmatched:
+            near = (f"nearest mutant {t['mutant_id']} is {offset(t, start, end):,} bp off"
+                    if "dup_start" in t else "no mutant has coordinates")
+            print(f"    {species} day {day}: {start:,}-{end:,}, {reads} junction reads; {near}")
 
 
 def main():
@@ -251,6 +278,12 @@ def main():
         rows = [("as reported", "estimate"), ("junction reads only", "junction"),
                 ("depth only", "depth")]
         print_table([(name, [dict(p, estimate=p[key]) for p in points]) for name, key in rows])
+        both = [p for p in points if p["junction"] is not None and p["depth"] is not None]
+        if both and len(both) < len(points):
+            print("  where both are measured:")
+            print_table([(f"  {name}", [dict(p, estimate=p[key]) for p in both])
+                         for name, key in (("junction reads", "junction"), ("depth", "depth"))],
+                        header=False)
         print("  reported estimates: " + ", ".join(f"{n} from {s}" for s, n in sorted(sources.items())))
 
     print()
@@ -269,7 +302,7 @@ def main():
     out = os.path.join(args.results_dir, "scatter_data.tsv")
     fields = ["species", "mutant_id", "mechanism", "dup_size", "day", "label", "true",
               "estimate", "low", "high", "source", "called", "junction_reads",
-              "reference_reads", "depth"]
+              "reference_reads", "depth", "depth_noise"]
     with open(out, "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=fields, delimiter="\t", extrasaction="ignore")
         w.writeheader()
