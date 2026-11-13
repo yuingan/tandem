@@ -225,6 +225,26 @@ def main(work):
               f"depth noise {hidden['depth_noise']}") if given and hidden else "missing rows"
     results.append(("intervals around the estimates", ok, detail))
 
+    # 10. No duplication at all, but a 2.4 kb repeat in the right-hand flank,
+    #     where the depth baseline is taken. Few reads can be placed in it; if
+    #     its positions counted, the baseline would sink and depth would report
+    #     a duplication that isn't there.
+    random.seed(41)
+    base = list("".join(random.choice("ACGT") for _ in range(300_000)))
+    base[102950:105350] = base[200000:202400]
+    flank_fa = os.path.join(work, "flank_repeat.fna")
+    write_fasta(flank_fa, [("chrom", "".join(base))])
+    w1, w2 = simulate(flank_fa, os.path.join(work, "flank_wt"), 1, 2, 0.0, 7)
+    metadata = os.path.join(work, "flank.tsv")
+    with open(metadata, "w") as f:
+        f.write("absent\t100001\t102700\n")
+    rows = run_population(flank_fa, w1, w2, metadata, os.path.join(work, "out_flank"))
+    r = rows[0] if rows else None
+    ok = (r is not None and r["depth_noise"] != ""
+          and abs(float(r["depth_dosage"])) <= 2 * float(r["depth_noise"]))
+    detail = (f"depth {r['depth_dosage']}, noise {r['depth_noise']} (truth 0)") if r else "no row"
+    results.append(("repeat in the depth baseline", ok, detail))
+
     failed = 0
     for name, ok, detail in results:
         print(f"  {'PASS' if ok else 'FAIL'}  {name:<42} {detail}")

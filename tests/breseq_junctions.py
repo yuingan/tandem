@@ -31,7 +31,9 @@ import sys
 
 MATCH = 25      # bp, on top of any overlap breseq reports
 
-GD_FILES = ("output/evidence/evidence.gd", "output/evidence/annotated.gd",
+# data/annotated.gd keeps every JC breseq weighed, user-supplied ones included
+# (marked user_defined=1), accepted or not
+GD_FILES = ("data/annotated.gd", "output/evidence/annotated.gd", "output/evidence/evidence.gd",
             "output/output.gd", "data/output.gd")
 
 M1_LINE = ("JC\t55\t.\tNC_012660\t1848645\t1\tNC_012660\t2864810\t-1\t0\t"
@@ -104,6 +106,12 @@ def best_match(jcs, seq_id, start, end):
                                      -abs(as_tandem(jc)[0] - start) - abs(as_tandem(jc)[1] - end)))
 
 
+def as_dosage(freq):
+    if freq is None:
+        return None
+    return round(freq / (1 - freq), 4) if freq < 1 else float("inf")
+
+
 def describe(jc):
     """dosage and counts from a JC line."""
     if jc is None:
@@ -115,8 +123,12 @@ def describe(jc):
              if jc.get(f"side_{i}_redundant", "0") != "1"]
     sides = [s for s in sides if s is not None]
     start, end = as_tandem(jc)
+    dosage = as_dosage(freq)
     return {
-        "dosage": round(freq / (1 - freq), 4) if freq is not None and freq < 1 else None,
+        "dosage": dosage if dosage != float("inf") else None,
+        # newer breseq versions give an interval for the frequency
+        "dosage_low": as_dosage(number(jc.get("frequency_lower"))),
+        "dosage_high": as_dosage(number(jc.get("frequency_upper"))),
         "called": 0 if jc.get("reject") else 1,
         "junction_reads": int(number(jc.get("new_junction_read_count")) or 0),
         "reference_reads": round(sum(sides) / len(sides), 1) if sides else "",
@@ -159,9 +171,9 @@ def cmd_convert(args):
     if not jcs and args.mode == "given":
         print(f"WARNING: no JC lines under {args.breseq_dir}, though junctions were given",
               file=sys.stderr)
-    columns = ["name", "dosage", "dosage_from", "called", "junction_reads", "reference_reads",
-               "breseq_frequency", "breseq_prediction", "breseq_reject",
-               "breseq_start", "breseq_end"]
+    columns = ["name", "dosage", "dosage_from", "dosage_low", "dosage_high", "called",
+               "junction_reads", "reference_reads", "breseq_frequency", "breseq_prediction",
+               "breseq_reject", "breseq_start", "breseq_end"]
     missing = 0
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
     with open(args.out, "w", newline="") as f:
@@ -191,7 +203,18 @@ def cmd_check(_):
     far = best_match([jc], "NC_012660", 1848645, 2864900)
     ok2 = far is None
     print(f"  {'PASS' if ok2 else 'FAIL'}  a junction 90 bp away is not matched")
-    return 0 if ok and ok2 else 1
+
+    # as a junction passed with --user-evidence-gd comes back, with an interval
+    given = parse_jc("JC\t7\t.\tchr\t5001\t1\tchr\t9000\t-1\t0\tfrequency=0.2\t"
+                     "frequency_lower=0.15\tfrequency_upper=0.25\tnew_junction_read_count=20\t"
+                     "side_1_read_count=80\tside_2_read_count=80\treject=FREQUENCY_CUTOFF\t"
+                     "user_defined=1")
+    row = describe(best_match([given], "chr", 5001, 9000))
+    ok3 = (row["dosage"] == 0.25 and row["dosage_low"] == 0.1765
+           and row["dosage_high"] == 0.3333 and row["called"] == 0)
+    print(f"  {'PASS' if ok3 else 'FAIL'}  a given junction and its interval converted  "
+          f"{row['dosage']} ({row['dosage_low']}-{row['dosage_high']})")
+    return 0 if ok and ok2 and ok3 else 1
 
 
 def main():

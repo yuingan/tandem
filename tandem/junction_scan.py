@@ -222,7 +222,8 @@ def scan(ref_seq, read_paths, k=ANCHOR_K, stride=STRIDE,
 
         raw = support / ref_count if ref_count else None
         fixed = raw * can_r / can_j if raw is not None and can_j else None
-        from_depth, noise = _depth_dosage(depth, start0, end0)
+        from_depth, noise = _depth_dosage(
+            depth, start0, end0, unique=lambda a, b: _unique_mask(ref_seq, index, k, a, b))
         # When no read can be placed on both sides of the junction (one end of
         # the unit inside a repeat longer than a read) or of the reference
         # boundary, the reads can't give a ratio; coverage still can.
@@ -390,36 +391,51 @@ def _ratio_interval(j, r, z=1.96):
     return lo / (1 - lo), (hi / (1 - hi) if hi < 1 else math.inf)
 
 
-def _depth_dosage(depth, start0, end0, windows=10, longest=50_000):
+def _depth_dosage(depth, start0, end0, unique=None, windows=10, longest=50_000):
     """Same quantity as the junction ratio, from coverage instead, and its noise.
 
     Depth inside a duplicated interval is 1 + f(n-1) times the depth outside,
-    so the two estimates should agree. The noise is how far the same statistic
-    strays where nothing is duplicated: unit-sized windows are laid end to end
-    beyond the baseline, up to `windows` on each side, and each is set against
-    its two neighbours as the unit is against its flanks.
+    so the two estimates should agree. Only positions whose k-mer is unique in
+    the genome are used (unique(a, b) gives the mask): few reads can be placed
+    in a repeat, and a repeat in the flanks would otherwise lower the baseline
+    and inflate the estimate.
+
+    The noise is how far the same statistic strays where nothing is
+    duplicated: unit-sized windows are laid end to end beyond the baseline, up
+    to `windows` on each side, and each is set against its two neighbours as
+    the unit is against its flanks.
     """
+    def take(a, b):
+        a, b = max(a, 0), min(b, len(depth))
+        values = depth[a:b]
+        if unique is None or b <= a:
+            return values
+        keep = np.zeros(b - a, dtype=bool)
+        mask = unique(a, b)
+        keep[:len(mask)] = mask[:b - a]
+        return values[keep]
+
     span = end0 - start0 + 1
     margin = 200                    # step off the junction before sampling
-    inside = depth[start0 + margin:end0 + 1 - margin]
+    inside = take(start0 + margin, end0 + 1 - margin)
     left_from = max(0, start0 - span - margin)
     right_to = end0 + 1 + margin + span
-    left = depth[left_from:max(0, start0 - margin)]
-    right = depth[end0 + 1 + margin:right_to]
-    outside = np.concatenate([left, right])
+    outside = np.concatenate([take(left_from, start0 - margin),
+                              take(end0 + 1 + margin, right_to)])
     if len(inside) < margin or len(outside) < margin:
         return None, None
-    # median, not mean: repeats in either window drop to zero depth
+    # median as well: what repeats remain shouldn't pull it
     base = float(np.median(outside))
     if base == 0:
         return None, None
     dosage = round(float(np.median(inside)) / base - 1.0, 4)
 
-    w = min(len(inside), longest)
+    w = min(span - 2 * margin, longest)
     null = []
     for starts in ([left_from - (k + 1) * w for k in range(windows)],
                    [right_to + k * w for k in range(windows)]):
-        tiles = [depth[a:a + w] for a in starts if 0 <= a and a + w <= len(depth)]
+        tiles = [take(a, a + w) for a in starts if 0 <= a and a + w <= len(depth)]
+        tiles = [t for t in tiles if len(t) >= margin]
         for prev, tile, nxt in zip(tiles, tiles[1:], tiles[2:]):
             flank = float(np.median(np.concatenate([prev, nxt])))
             if flank > 0:
@@ -431,16 +447,22 @@ def _depth_dosage(depth, start0, end0, windows=10, longest=50_000):
     return dosage, round(1.4826 * mad, 4)
 
 
+def _unique_mask(ref_seq, index, k, a, b):
+    """For positions a..b-1 (a >= 0): does the k-mer starting there occur once?"""
+    b = min(b, len(ref_seq) - k + 1)
+    mask = np.zeros(max(b - a, 0), dtype=bool)
+    if b > a:
+        codes, offs = _encode_all(ref_seq[a:b + k - 1], k)
+        mask[offs] = index.anchors_at(codes) >= 0
+    return mask
+
+
 def _uniqueness(ref_seq, index, k, windows):
     """uniq(p): does the k-mer starting at p occur once in the genome, either strand?"""
     masks = []
     for a, b in windows:
-        a, b = max(a, 0), min(b, len(ref_seq) - k + 1)
-        mask = np.zeros(max(b - a, 0), dtype=bool)
-        if b > a:
-            codes, offs = _encode_all(ref_seq[a:b + k - 1], k)
-            mask[offs] = index.anchors_at(codes) >= 0
-        masks.append((a, mask))
+        a = max(a, 0)
+        masks.append((a, _unique_mask(ref_seq, index, k, a, b)))
 
     def uniq(p):
         for a, mask in masks:
