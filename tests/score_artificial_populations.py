@@ -33,8 +33,10 @@ counts as 0 in the junction-only row.
 Then, where the output has them: how often the 95% interval holds the truth,
 for the estimate reported and for depth +/- 2 noise at every point; and which
 duplications were found without being named, from a scan of the same reads
-(<species>_day<d>_scan/junctions.tsv) or breseq's own calls, with any
-junction found that matches no mutant listed.
+(<species>_day<d>_scan/junctions.tsv) or breseq's own calls. Scan results are
+counted at the scan's own threshold and again counting only junctions with 3
+or more reads. Any junction found that matches no mutant is listed, with the
+distance from each of its ends to the nearest mutant boundary.
 """
 
 import argparse
@@ -44,6 +46,7 @@ import os
 import sys
 
 MATCH = 25      # bp; a found junction this close to the true one at both ends is it
+STRICT = 3      # reads; discovery is also counted at this stricter support
 
 
 def number(value):
@@ -91,6 +94,16 @@ def offset(t, start, end):
     return max(abs(start - t["dup_start"]), abs(end - t["dup_end"]))
 
 
+def nearest_end(truth, pos):
+    """The mutant boundary closest to pos, as text."""
+    ends = [(abs(pos - t[f"dup_{side}"]), t["mutant_id"], side)
+            for t in truth for side in ("start", "end") if f"dup_{side}" in t]
+    if not ends:
+        return "no mutant has coordinates"
+    distance, mutant, side = min(ends)
+    return f"{distance:,} bp from the {side} of {mutant}"
+
+
 def load_points(gt_dir, results_dir, labels_as_written=False):
     points, columns, missing, unmatched = [], set(), [], []
     for species in sorted(os.listdir(gt_dir)):
@@ -113,14 +126,16 @@ def load_points(gt_dir, results_dir, labels_as_written=False):
             scan_path = os.path.join(run + "_scan", "junctions.tsv")
             scan = read_scan(scan_path) if os.path.isfile(scan_path) else None
             for s, e, n in scan or []:
-                nearest = min(truth, key=lambda t: offset(t, s, e))
-                if offset(nearest, s, e) > MATCH:
-                    unmatched.append((species, day, s, e, n, nearest))
+                if all(offset(t, s, e) > MATCH for t in truth):
+                    unmatched.append((species, day, s, e, n,
+                                      nearest_end(truth, s), nearest_end(truth, e)))
             for t in truth:
                 r = results.get(t["mutant_id"], {})
-                called = r.get("called")
+                called, called_strict = r.get("called"), None
                 if scan is not None and "dup_start" in t:
                     called = float(found(scan, t["dup_start"], t["dup_end"]))
+                    called_strict = float(found([x for x in scan if x[2] >= STRICT],
+                                                t["dup_start"], t["dup_end"]))
                 points.append({
                     "species": species,
                     "mutant_id": t["mutant_id"],
@@ -137,6 +152,7 @@ def load_points(gt_dir, results_dir, labels_as_written=False):
                     "low": r.get("low"),
                     "high": r.get("high"),
                     "called": called,
+                    "called_3reads": called_strict,
                     "junction_reads": r.get("junction_reads", ""),
                     "reference_reads": r.get("reference_reads", ""),
                 })
@@ -222,18 +238,22 @@ def print_detection(points, unmatched):
     rows = [p for p in points if p["called"] is not None]
     if not rows:
         return
+    scanned = any(p["called_3reads"] is not None for p in rows)
+    keys = ["called", "called_3reads"] if scanned else ["called"]
     print()
-    print("Found without being named:")
+    print(f"{'Found without being named:':<30}"
+          + (f"{'as scanned':>10}{f'{STRICT}+ reads':>10}" if scanned else ""))
     for name, test in BANDS:
         band = [p for p in rows if test(p["true"])]
         if band:
-            print(f"  {name:<10} {sum(1 for p in band if p['called']):>4}/{len(band)}")
-    if unmatched:
-        print(f"  {len(unmatched)} other junction(s) reported that match no mutant:")
-        for species, day, start, end, reads, t in unmatched:
-            near = (f"nearest mutant {t['mutant_id']} is {offset(t, start, end):,} bp off"
-                    if "dup_start" in t else "no mutant has coordinates")
-            print(f"    {species} day {day}: {start:,}-{end:,}, {reads} junction reads; {near}")
+            cells = [f"{sum(1 for p in band if p[k])}/{len(band)}" for k in keys]
+            print(f"  {name:<28}" + "".join(f"{c:>10}" for c in cells))
+    if scanned:
+        strict = sum(1 for u in unmatched if u[4] >= STRICT)
+        print(f"  {'junctions matching no mutant':<28}{len(unmatched):>10}{strict:>10}")
+    for species, day, start, end, reads, near_start, near_end in unmatched:
+        print(f"    {species} day {day}: {start:,}-{end:,}, {reads} reads; "
+              f"start {near_start}, end {near_end}")
 
 
 def main():
@@ -301,8 +321,8 @@ def main():
 
     out = os.path.join(args.results_dir, "scatter_data.tsv")
     fields = ["species", "mutant_id", "mechanism", "dup_size", "day", "label", "true",
-              "estimate", "low", "high", "source", "called", "junction_reads",
-              "reference_reads", "depth", "depth_noise"]
+              "estimate", "low", "high", "source", "called", "called_3reads",
+              "junction_reads", "reference_reads", "depth", "depth_noise"]
     with open(out, "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=fields, delimiter="\t", extrasaction="ignore")
         w.writeheader()
