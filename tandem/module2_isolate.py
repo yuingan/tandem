@@ -516,13 +516,19 @@ def _save_results(confirmed, output_dir):
 
 def run_scan(ref_fasta, read1, read2=None, output_dir=".",
              min_anchor=25, min_support=2, min_size=200, control=None,
-             threads=1):
+             threads=1, starts=None, ends=None, slop=400):
     """Find junctions in the reads, no coordinates needed.
 
     control: junctions.tsv from a scan of a sample without the duplications,
     such as the ancestor, best run with --min-support 1. Junctions found there
     too are background (repeats, library artefacts, differences from the
     reference), not events, and are marked with their control support.
+
+    starts, ends: candidate boundaries (1-based), e.g. read off a coverage
+    plot. Every start is paired with every end after it, and each pair is
+    reported: at the best-supported junction within slop bases of both
+    boundaries, or where it was given, with no junction reads, if there is
+    none.
     """
     import csv
 
@@ -536,17 +542,44 @@ def run_scan(ref_fasta, read1, read2=None, output_dir=".",
     index = KmerIndex(sequences)
 
     results = []
-    for seq_id, seq in sequences.items():
-        logger.info(f"Scanning reads against {seq_id}")
-        # one pass over the reads per contig; positions are contig-local
-        for hit in scan(seq, [read1, read2], min_anchor=min_anchor,
-                        min_support=min_support, min_size=min_size,
-                        index=index, contig_start=index._seq_offsets[seq_id],
-                        threads=threads):
-            hit["seq_id"] = seq_id
+    if starts:
+        # as in module 3, given coordinates refer to the main contig
+        seq_id = max(sequences, key=lambda s: len(sequences[s]))
+        seq = sequences[seq_id]
+        pairs = [(s, e) for s in starts for e in ends if s < e <= len(seq)]
+        if not pairs:
+            logger.error(f"No start/end pair fits {seq_id} ({len(seq):,} bp) "
+                         f"with the start before the end")
+            return []
+        logger.info(f"Checking {len(pairs)} start/end pair(s) on {seq_id}, "
+                    f"each boundary matched within {slop} bp")
+        smallest = min(e - s + 1 for s, e in pairs)
+        hits = scan(seq, [read1, read2], min_anchor=min_anchor,
+                    min_size=min(min_size, smallest), index=index,
+                    contig_start=index._seq_offsets[seq_id], threads=threads,
+                    targets=pairs, slop=slop)
+        seen = set()
+        for (s, e), hit in zip(pairs, hits):
+            # several pairs can land on the same junction; list it once
+            if (hit["start"], hit["end"]) in seen:
+                continue
+            seen.add((hit["start"], hit["end"]))
+            hit.update(seq_id=seq_id, provided_start=s, provided_end=e)
             results.append(hit)
+    else:
+        for seq_id, seq in sequences.items():
+            logger.info(f"Scanning reads against {seq_id}")
+            # one pass over the reads per contig; positions are contig-local
+            for hit in scan(seq, [read1, read2], min_anchor=min_anchor,
+                            min_support=min_support, min_size=min_size,
+                            index=index, contig_start=index._seq_offsets[seq_id],
+                            threads=threads):
+                hit["seq_id"] = seq_id
+                results.append(hit)
 
     results.sort(key=lambda r: -r["junction_reads"])
+    for r in results:
+        r["junction_sequence"] = _junction_sequence(sequences[r["seq_id"]], r["start"], r["end"])
 
     if control:
         background = _read_control(control)
@@ -560,8 +593,10 @@ def run_scan(ref_fasta, read1, read2=None, output_dir=".",
         logger.info(f"  {n} of {len(results)} junction(s) also found in the control")
 
     columns = ["seq_id", "start", "end", "size", "microhomology",
-               "junction_reads", "reference_reads", "dosage", "dosage_raw",
-               "junction_visible", "reference_visible", "depth_dosage"]
+               "junction_reads", "reference_reads", "dosage", "dosage_from",
+               "dosage_raw", "junction_visible", "reference_visible", "depth_dosage"]
+    if starts:
+        columns[1:1] = ["provided_start", "provided_end"]
     if control:
         columns.append("control_reads")
     path = os.path.join(output_dir, "junctions.tsv")
@@ -573,13 +608,22 @@ def run_scan(ref_fasta, read1, read2=None, output_dir=".",
 
     for r in results:
         note = f"  control={r['control_reads']}" if control else ""
+        given = ""
+        if starts and (r["start"], r["end"]) != (r["provided_start"], r["provided_end"]):
+            given = f" (given {r['provided_start']:,}-{r['provided_end']:,})"
         logger.info(
-            f"  {r['seq_id']}:{r['start']:,}-{r['end']:,}  {r['size']:,}bp  "
+            f"  {r['seq_id']}:{r['start']:,}-{r['end']:,}{given}  {r['size']:,}bp  "
             f"junction={r['junction_reads']} reference={r['reference_reads']}  "
-            f"dosage={r['dosage']} (raw {r['dosage_raw']}, junction visible "
+            f"dosage={r['dosage']} from {r['dosage_from']} (junction visible "
             f"{r['junction_visible']})  depth={r['depth_dosage']}{note}"
         )
+    logger.info(f"  Results saved to {path}")
     return results
+
+
+def _junction_sequence(seq, start, end, k=30):
+    """What a read across the junction carries: the unit's end, then its start."""
+    return seq[max(0, end - k):end] + "|" + seq[start - 1:start - 1 + k]
 
 
 CONTROL_SLOP = 50   # bp; the same background junction lands within a few bases

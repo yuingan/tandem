@@ -1222,6 +1222,7 @@ def run_module1(ref_fasta, output_dir, threads=1, max_distance=50000,
     if not tandems:
         logger.info("  No tandem duplications detected.")
         _save_results([], output_dir)
+        _save_copies([], sequences, output_dir)
         return []
 
     # Stage 2: Optional CDS subcategorization
@@ -1240,9 +1241,9 @@ def run_module1(ref_fasta, output_dir, threads=1, max_distance=50000,
             "Stage 2 skipped (no annotation provided; use --annotation to enable)"
         )
 
-    # Stage 3: Classify mechanisms
+    # Stage 3: what the junctions look like
     logger.info("=" * 60)
-    logger.info("Stage 3: Mechanism classification")
+    logger.info("Stage 3: Junction architecture")
     logger.info("=" * 60)
     classified = describe_junctions(
         tandems, sequences, flag_distance=flag_distance,
@@ -1256,8 +1257,35 @@ def run_module1(ref_fasta, output_dir, threads=1, max_distance=50000,
 
     # Save results
     _save_results(classified, output_dir)
+    _save_copies(classified, sequences, output_dir)
 
     return classified
+
+
+def copy_spans(call):
+    """(start, end) of each copy, 1-based inclusive; every unit of an array."""
+    n = call.get("copy_number", 2)
+    if n > 2:
+        unit, start = call["size"], call["copy1_start"]
+        stop = start + round(n * unit) - 1
+        return [(s, min(s + unit - 1, stop)) for s in range(start, stop + 1, unit)]
+    return [(call["copy1_start"], call["copy1_end"]),
+            (call["copy2_start"], call["copy2_end"])]
+
+
+def _save_copies(tandems, sequences, output_dir):
+    """Each copy's sequence, named <row>.<copy> after the report's numbering."""
+    path = os.path.join(output_dir, "copies.fasta")
+    with open(path, "w") as f:
+        for i, td in enumerate(tandems, 1):
+            seq = sequences.get(td["seq_id"], "")
+            for j, (start, end) in enumerate(copy_spans(td), 1):
+                copy = seq[start - 1:end]
+                f.write(f">{i}.{j} {td['seq_id']}:{start}-{end}\n")
+                for k in range(0, len(copy), 70):
+                    f.write(copy[k:k + 70] + "\n")
+    if tandems:
+        logger.info(f"  Copy sequences saved to {path}")
 
 
 def _save_pairs(pairs, output_dir, name, extra=()):

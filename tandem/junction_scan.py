@@ -217,6 +217,13 @@ def scan(ref_seq, read_paths, k=ANCHOR_K, stride=STRIDE,
 
         raw = support / ref_count if ref_count else None
         fixed = raw * can_r / can_j if raw is not None and can_j else None
+        from_depth = _depth_dosage(depth, start0, end0)
+        # When no read can be placed on both sides of the junction (one end of
+        # the unit inside a repeat longer than a read) or of the reference
+        # boundary, the reads can't give a ratio; coverage still can.
+        dosage, source = fixed, "junction"
+        if fixed is None:
+            dosage, source = from_depth, ("depth" if from_depth is not None else "")
         return {
             "start": start0 + 1,
             "end": end0 + 1,
@@ -224,11 +231,12 @@ def scan(ref_seq, read_paths, k=ANCHOR_K, stride=STRIDE,
             "microhomology": mh,
             "junction_reads": int(support),
             "reference_reads": int(ref_count),
-            "dosage": round(fixed, 4) if fixed is not None else None,
+            "dosage": round(dosage, 4) if dosage is not None else None,
+            "dosage_from": source,
             "dosage_raw": round(raw, 4) if raw is not None else None,
             "junction_visible": round(can_j / most, 3),
             "reference_visible": round(can_r / most, 3),
-            "depth_dosage": _depth_dosage(depth, start0, end0),
+            "depth_dosage": from_depth,
         }
 
     if targets is not None:

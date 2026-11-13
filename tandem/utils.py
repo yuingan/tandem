@@ -12,21 +12,29 @@ import numpy as np
 logger = logging.getLogger("tandem")
 
 
-def setup_logging(verbosity=0):
-    """Configure logging based on verbosity level."""
-    level = logging.WARNING
-    if verbosity == 1:
-        level = logging.INFO
-    elif verbosity >= 2:
+def setup_logging(verbosity=0, quiet=False):
+    """Progress goes to stderr by default; -q keeps only warnings, -v adds debug."""
+    level = logging.INFO
+    if quiet:
+        level = logging.WARNING
+    elif verbosity >= 1:
         level = logging.DEBUG
 
     handler = logging.StreamHandler(sys.stderr)
-    handler.setFormatter(logging.Formatter(
-        "[%(asctime)s] %(levelname)s - %(message)s", datefmt="%H:%M:%S"
-    ))
+    handler.setFormatter(_Formatter("[%(asctime)s] %(message)s", datefmt="%H:%M:%S"))
     root = logging.getLogger("tandem")
     root.setLevel(level)
     root.addHandler(handler)
+
+
+class _Formatter(logging.Formatter):
+    """Progress lines plain; warnings and errors say what they are."""
+
+    def format(self, record):
+        if record.levelno >= logging.WARNING:
+            record = logging.makeLogRecord(record.__dict__)
+            record.msg = f"{record.levelname}: {record.msg}"
+        return super().format(record)
 
 
 def check_dependency(name, test_cmd=None):

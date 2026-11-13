@@ -5,8 +5,9 @@
 Covers the cases real data throws at the scanner: reads running across the
 origin of a circular chromosome, a duplication on a second contig, a small
 indel that should stay below the size floor, a repeat right beside the
-junction, and background marked from a control sample. Prints PASS/FAIL per
-case and exits non-zero if anything failed.
+junction, background marked from a control sample, boundaries given only
+roughly, and a junction no read can cross. Prints PASS/FAIL per case and
+exits non-zero if anything failed.
 """
 
 import csv
@@ -59,6 +60,15 @@ def run_population(ref, r1, r2, metadata, outdir):
     return list(csv.DictReader(lines, delimiter="\t"))
 
 
+def table_text(outdir):
+    """The summary table of the HTML report, tags stripped."""
+    import re
+    with open(os.path.join(outdir, "tandem_report.html")) as f:
+        html = f.read()
+    body = html.split("<tbody>", 1)[1].split("</tbody>", 1)[0] if "<tbody>" in html else ""
+    return " ".join(re.sub(r"<[^>]+>", " ", body).split())
+
+
 def near(row, seq_id, start, end, slop=5):
     return (row["seq_id"] == seq_id
             and abs(int(row["start"]) - start) <= slop
@@ -87,6 +97,12 @@ def main(work):
     dosage = rows[0]["dosage"] if rows else "-"
     results.append(("circular chromosome, 10 kb at f=0.4", ok,
                     f"{len(rows)} junction(s), dosage {dosage}"))
+    circ = rows
+
+    # The report shows what junctions.tsv holds, not the old module 2 fields.
+    text = table_text(os.path.join(work, "out_circ"))
+    ok = "50,000" in text and "60,000" in text and (not circ or circ[0]["junction_reads"] in text.split())
+    results.append(("isolate report lists the junction", ok, text[:60]))
 
     # 2. Two contigs, duplication on the second one.
     c1, c2 = simulate(chrom_fa, os.path.join(work, "wt"), 1, 2, 0.0, 12)
@@ -155,6 +171,45 @@ def main(work):
     detail = (f"dosage {given['dosage']} (truth 0.4), off-by-6 {shifted['dosage']}, "
               f"absent {absent['dosage']}") if ok or (given and shifted and absent) else "missing rows"
     results.append(("population mode at known junctions", ok, detail))
+
+    # 7. Isolate mode with boundaries read off a coverage plot, 150 bp out: every
+    #    start paired with every end after it, each reported once.
+    out = os.path.join(work, "out_iso_given")
+    subprocess.run(["tandem", "-r", chrom_fa, "-i", os.path.join(work, "circ_R1.fq"),
+                    "-I", os.path.join(work, "circ_R2.fq"), "-iso",
+                    "-s", "49850", "120000", "-e", "60150", "125000", "-o", out],
+                   check=True, capture_output=True)
+    with open(os.path.join(out, "junctions.tsv")) as f:
+        rows = {(int(r["provided_start"]), int(r["provided_end"])): r
+                for r in csv.DictReader(f, delimiter="\t")}
+    hit = rows.get((49850, 60150))
+    others = [r for key, r in rows.items() if key != (49850, 60150)]
+    ok = (hit is not None and near(hit, "chrom", 50000, 60000)
+          and circ and hit["junction_reads"] == circ[0]["junction_reads"]
+          and len(others) == 2 and all(int(r["junction_reads"]) == 0 for r in others))
+    detail = (f"{hit['start']}-{hit['end']}, {hit['junction_reads']} reads; "
+              f"{len(others)} other pair(s) without reads") if hit else f"{len(rows)} row(s)"
+    results.append(("isolate mode with -s/-e, 150 bp out", ok, detail))
+
+    # 8. The first 400 bp of the unit also occur elsewhere, longer than a read:
+    #    no read can be placed across the junction, so the dosage comes from
+    #    depth.
+    random.seed(13)
+    base = list("".join(random.choice("ACGT") for _ in range(300_000)))
+    base[200000:200400] = base[100000:100400]
+    hidden_fa = os.path.join(work, "repeat_400_at_start.fna")
+    write_fasta(hidden_fa, [("chrom", "".join(base))])
+    h1, h2 = simulate(hidden_fa, os.path.join(work, "hidden"), 100001, 110000, 0.5, 17)
+    metadata = os.path.join(work, "hidden.tsv")
+    with open(metadata, "w") as f:
+        f.write("hidden\t100001\t110000\n")
+    rows = run_population(hidden_fa, h1, h2, metadata, os.path.join(work, "out_hidden"))
+    r = rows[0] if rows else None
+    ok = (r is not None and int(r["junction_reads"]) == 0 and float(r["junction_visible"]) == 0
+          and r["dosage_from"] == "depth" and 0.35 <= float(r["dosage"]) <= 0.65)
+    detail = (f"junction visible {r['junction_visible']}, dosage {r['dosage']} from "
+              f"{r['dosage_from']} (truth 0.5)") if r else "no row"
+    results.append(("junction inside a repeat: depth instead", ok, detail))
 
     failed = 0
     for name, ok, detail in results:

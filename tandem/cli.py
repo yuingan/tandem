@@ -4,9 +4,9 @@
     tandem -r ref.fna -i R1.fq -I R2.fq -iso            find junctions in reads (module 2)
     tandem -r ref.fna -i R1.fq -I R2.fq -pop -m meta.tsv  quantify known junctions (module 3)
 
-Module 2 finds junctions from the reads themselves. The older two-step
-workflow (coverage plot, then -s/-e by hand) is still available with
---legacy-search.
+Module 2 finds junctions from the reads themselves; -s/-e only narrow it to
+candidate boundaries. The v0.3 search (coverage plot, then a read-mapping
+search at -s/-e) is still available with --legacy-search.
 """
 
 import argparse
@@ -24,28 +24,28 @@ def parse_args(argv=None):
     parser = argparse.ArgumentParser(
         prog="tandem",
         description=(
-            "Tandem: Detection and classification of tandem duplication "
-            "mechanisms in bacterial genomes"
+            "Tandem: tandem duplications in bacterial reference genomes, their "
+            "junctions in sequencing reads, and how common they are in a population"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Module 1: Detect tandem duplications in a reference genome
+  # Module 1: tandem duplications and arrays in a reference genome
   tandem -r genome.fna -o results/
 
-  # Module 2: Discover junctions from isolate resequencing
+  # Module 2: duplication junctions in an isolate's reads, no coordinates needed
   tandem -r genome.fna -i reads_R1.fq -I reads_R2.fq -iso -t 8
 
-  # Module 2: With manual region coordinates
+  # Module 2: only junctions near candidate boundaries (matched within 400 bp)
   tandem -r genome.fna -i reads_R1.fq -I reads_R2.fq -iso -s 10000 -e 25000
 
-  # Module 3: Quantify known junctions in population data
+  # Module 3: how common known duplications are in a population sample
   tandem -r genome.fna -i pop_R1.fq -I pop_R2.fq -pop -m junctions.tsv -t 8
 
-  # Module 3 metadata format (tab-separated):
-  # Name    Start   End     Sequence(optional)
+  # Module 3 metadata: tab-separated name, first and last base of the
+  # duplicated unit (1-based), each matched to the junction within 20 bp
   # J1      10000   25000
-  # J2      50000   68000   ACGTACGT...
+  # J2      50000   68000
         """,
     )
 
@@ -68,7 +68,8 @@ Examples:
     # Mode flags
     parser.add_argument(
         "--legacy-search", action="store_true",
-        help="Use the old two-step workflow: coverage plot, then -s/-e by hand"
+        help="Use the v0.3 search instead of the scan: a coverage plot without "
+             "-s/-e, a read-mapping search with them. Needs minimap2 and samtools."
     )
     parser.add_argument(
         "--min-anchor", type=int, default=25,
@@ -87,11 +88,11 @@ Examples:
     )
     parser.add_argument(
         "-iso", "--isolate", action="store_true",
-        help="Isolate mode (Module 2): confirm duplication junctions in "
-             "resequencing data. Without -s/-e: generates coverage plot for "
-             "boundary identification. With -s/-e: tests all start×end "
-             "combinations and reports confirmed junctions with mechanism "
-             "classification."
+        help="Isolate mode (Module 2): find tandem duplication junctions in "
+             "the reads and count the reads on each allele. With -s/-e, every "
+             "start is paired with every end and each pair is reported at the "
+             "junction within --window + --flank bp of it (--flank only with "
+             "--precise), or with no junction reads if there is none."
     )
     parser.add_argument(
         "-pop", "--population", action="store_true",
@@ -114,31 +115,31 @@ Examples:
     # Coordinates are 1-based inclusive (paper/NCBI/GenBank convention)
     parser.add_argument(
         "-s", "--start", type=int, nargs="+",
-        help="Start position(s) for junction search (1-based inclusive, "
-             "matching paper/NCBI convention). Multiple values allowed: "
-             "-s 1854339 1856867 (tests all start×end combinations)"
+        help="First base of the duplicated unit, approximately (1-based). "
+             "Several values allowed: -s 1854339 1856867"
     )
     parser.add_argument(
         "-e", "--end", type=int, nargs="+",
-        help="End position(s) for junction search (1-based inclusive, "
-             "matching paper/NCBI convention). Multiple values allowed: "
-             "-e 2866785 2860261 (tests all start×end combinations)"
+        help="Last base of the duplicated unit, approximately (1-based). "
+             "Several values allowed: -e 2866785 2860261"
     )
 
     # Parameters
     parser.add_argument(
         "-w", "--window", type=int, default=200,
-        help="Sliding window size for coverage detection (default: 200)"
+        help="Coverage window (default: 200). With -s/-e, also added to "
+             "--flank to give how far a junction may sit from each boundary."
     )
     parser.add_argument(
         "-flank", "--flank", type=int, default=200,
-        help="Flank region size for junction search (default: 200)"
+        help="With -s/-e, how far a junction may sit from each boundary, "
+             "added to --window (default: 200). With -pop, how far from the "
+             "metadata coordinates (default there: 20)."
     )
     parser.add_argument(
         "--precise", action="store_true",
-        help="Precise mode: search range = flank only (no window added). "
-             "Use when you know the exact junction position. "
-             "Without this flag, search range = window + flank."
+        help="With -s/-e, match boundaries within --flank only, not "
+             "--window + --flank."
     )
     parser.add_argument(
         "--max-k", type=int, default=75,
@@ -206,10 +207,10 @@ Examples:
     )
     parser.add_argument(
         "--min-size", type=int, default=200,
-        help="Minimum duplication size in bp (default: 200). Duplications "
-             "smaller than 500bp have additional filters applied (see "
-             "--short-dup-gap-ratio). Mechanism inference confidence is "
-             "reported as low (<300bp), moderate (300-500bp), or high (>=500bp)."
+        help="Smallest duplicated unit reported, in bp (default: 200). In "
+             "Module 1, arrays with a shorter unit go to short_unit_arrays.tsv, "
+             "and pairs below 500 bp must have a gap shorter than the copy and "
+             "copies that are not low-complexity (see --no-short-dup-filters)."
     )
     parser.add_argument(
         "-c", "--circular", action="store_true", default=True,
@@ -292,7 +293,11 @@ Examples:
     # Verbosity
     parser.add_argument(
         "-v", "--verbose", action="count", default=0,
-        help="Increase verbosity (-v for info, -vv for debug)"
+        help="Also print debugging detail. Progress is printed by default."
+    )
+    parser.add_argument(
+        "-q", "--quiet", action="store_true",
+        help="Print warnings and errors only"
     )
 
     parser.add_argument(
@@ -384,7 +389,7 @@ def main(argv=None):
     args = parse_args(argv)
 
     # Setup logging
-    utils.setup_logging(args.verbose)
+    utils.setup_logging(args.verbose, quiet=args.quiet)
 
     start_time = time.time()
 
@@ -413,11 +418,13 @@ def main(argv=None):
         print(f"Reverse reads: {args.read2}")
     print(f"Output: {args.output}")
     print(f"Threads: {args.threads}")
+    # how far a junction may sit from a given -s/-e boundary
+    search_range = args.flank if args.precise else args.window + args.flank
     if module_num == 2:
-        if hasattr(args, 'precise') and args.precise:
-            print(f"Flank: {args.flank} bp (precise mode)")
-        else:
-            print(f"Flank: {args.flank} bp")
+        if args.legacy_search:
+            print(f"Flank: {args.flank} bp{' (precise mode)' if args.precise else ''}")
+        elif args.start is not None:
+            print(f"Boundaries matched within: {search_range} bp")
 
     # Handle --no-circular overriding --circular
     is_circular = args.circular and not args.no_circular
@@ -428,10 +435,9 @@ def main(argv=None):
 
     # Check dependencies
     deps_needed = [2] if module_num == -1 else [module_num]
-    scan_mode = module_num == 2 and args.start is None and not args.legacy_search
     # the scan and module 3 place reads themselves; only coverage plots and
-    # the coordinate-guided legacy search still map them
-    needs_mapper = module_num == -1 or (module_num == 2 and not scan_mode)
+    # the legacy search still map them
+    needs_mapper = module_num == -1 or (module_num == 2 and args.legacy_search)
     utils.check_dependencies(deps_needed, needs_mapper=needs_mapper)
 
     # Create output directory
@@ -481,7 +487,7 @@ def main(argv=None):
         module_name = "module1"
 
     elif module_num == 2:
-        if args.start is None and not args.legacy_search:
+        if not args.legacy_search:
             from .module2_isolate import run_scan
             results = run_scan(
                 ref_fasta=args.reference,
@@ -493,6 +499,10 @@ def main(argv=None):
                 min_size=args.min_size,
                 control=args.control_junctions,
                 threads=args.threads,
+                # _validate_args made the starts 0-based for the legacy search
+                starts=[s + 1 for s in args.start] if args.start else None,
+                ends=args.end,
+                slop=search_range,
             )
             module_name = "module2"
         else:
@@ -542,10 +552,12 @@ def main(argv=None):
         if args.read2:
             extra_info["Reverse Reads"] = os.path.basename(args.read2)
         extra_info["Threads"] = str(args.threads)
-        if module_num == 2:
+        if module_num == 2 and args.legacy_search:
             extra_info["Flank"] = f"{args.flank} bp"
-            if hasattr(args, 'precise') and args.precise:
+            if args.precise:
                 extra_info["Mode"] = "Precise"
+        elif module_num == 2 and args.start is not None:
+            extra_info["Boundaries matched within"] = f"{search_range} bp"
 
         generate_report(
             results=results,
@@ -561,7 +573,8 @@ def main(argv=None):
         print(f"Coverage plot generated.")
         print(f"Time: {elapsed:.1f}s")
         print(f"Output: {args.output}/")
-        print(f"Inspect the coverage plot, then run with -iso -s START -e END for targeted junction discovery.")
+        print("-iso finds junctions from the reads without coordinates; add -s/-e to check "
+              "boundaries read off this plot.")
     else:
         print(f"Tandem complete. {len(results)} result(s).")
         print(f"Time: {elapsed:.1f}s")

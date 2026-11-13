@@ -27,7 +27,7 @@ logger = logging.getLogger("tandem")
 COLUMNS = [
     "name", "seq_id", "provided_start", "provided_end",
     "dup_start", "dup_end", "dup_size",
-    "junction_reads", "reference_reads", "dosage", "dosage_raw",
+    "junction_reads", "reference_reads", "dosage", "dosage_from", "dosage_raw",
     "junction_visible", "reference_visible", "depth_dosage",
     "flanking_repeat", "repeat_len", "repeat_identity",
     "microhomology_bp", "microhomology_seq",
@@ -93,6 +93,7 @@ def run_module3(ref_fasta, read1, read2=None, metadata_path=None,
             "junction_reads": hit["junction_reads"],
             "reference_reads": hit["reference_reads"],
             "dosage": hit["dosage"],
+            "dosage_from": hit["dosage_from"],
             "dosage_raw": hit["dosage_raw"],
             "junction_visible": hit["junction_visible"],
             "reference_visible": hit["reference_visible"],
@@ -111,7 +112,7 @@ def run_module3(ref_fasta, read1, read2=None, metadata_path=None,
         logger.info(
             f"  {r['name']}: {r['dup_start']:,}-{r['dup_end']:,}{moved}  "
             f"junction={r['junction_reads']} reference={r['reference_reads']}  "
-            f"dosage={r['dosage']} (raw {r['dosage_raw']})  depth={r['depth_dosage']}"
+            f"dosage={r['dosage']} from {r['dosage_from']}  depth={r['depth_dosage']}"
         )
 
     _save_results(results, output_dir)
@@ -123,6 +124,8 @@ def _save_results(results, output_dir):
     with open(tsv_path, "w") as f:
         f.write("# dosage = junction reads / reference reads, each corrected for the read\n")
         f.write("# placements the scan can count there: f(n-1), extra copies per cell.\n")
+        f.write("# Where no read can be placed across the junction, dosage is from depth\n")
+        f.write("# (dosage_from).\n")
         f.write("\t".join(COLUMNS) + "\n")
         for r in results:
             f.write("\t".join("" if r.get(c) is None else str(r.get(c)) for c in COLUMNS) + "\n")
@@ -136,7 +139,9 @@ def _save_results(results, output_dir):
                 "Junction reads over reference reads at the same boundary, each "
                 "corrected for the read placements that can be counted there. "
                 "Estimates f(n-1), the extra copies per cell; for a duplication "
-                "adding one copy, the share of cells that carry it."
+                "adding one copy, the share of cells that carry it. Where no read "
+                "can be placed across the junction, the estimate is from depth "
+                "(dosage_from)."
             ),
             "results": results,
         }, f, indent=2)

@@ -45,6 +45,11 @@ echo "---------------------------------------------------------"
 python "$here/check_module1_calls.py" || status=1
 
 echo
+echo "Module 1: copy sequences and report"
+echo "-----------------------------------"
+python "$here/check_report.py" "$work" "$data" || status=1
+
+echo
 echo "Microhomology at the junction"
 echo "-----------------------------"
 python "$here/check_microhomology.py" || status=1
