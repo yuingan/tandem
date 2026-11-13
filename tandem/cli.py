@@ -429,7 +429,10 @@ def main(argv=None):
     # Check dependencies
     deps_needed = [2] if module_num == -1 else [module_num]
     scan_mode = module_num == 2 and args.start is None and not args.legacy_search
-    utils.check_dependencies(deps_needed, needs_mapper=not scan_mode)
+    # the scan and module 3 place reads themselves; only coverage plots and
+    # the coordinate-guided legacy search still map them
+    needs_mapper = module_num == -1 or (module_num == 2 and not scan_mode)
+    utils.check_dependencies(deps_needed, needs_mapper=needs_mapper)
 
     # Create output directory
     utils.ensure_dir(args.output)
@@ -514,15 +517,10 @@ def main(argv=None):
 
     elif module_num == 3:
         from .module3_population import run_module3
-        # Module 3 uses a smaller flank window (default ±20bp) to tolerate
-        # coordinate uncertainty from microhomology (0-25bp typical) or
-        # different tools. If user sets --flank explicitly, use that value.
-        # Larger values (>50) dramatically slow down the search without
-        # meaningful biological benefit.
-        if args.flank == 200:  # default for module 2
-            module3_flank = 20
-        else:
-            module3_flank = args.flank
+        # Coordinates from other tools are often a few bases off; each junction
+        # is matched to the best-supported one within this many bases. The
+        # --flank default (200) is module 2's search window, too wide here.
+        module3_flank = 20 if args.flank == 200 else args.flank
         results = run_module3(
             ref_fasta=args.reference,
             read1=args.read1,
@@ -532,6 +530,7 @@ def main(argv=None):
             threads=args.threads,
             flank=module3_flank,
             hr_complexity_filter=not args.no_hr_complexity_filter,
+            min_anchor=args.min_anchor,
         )
         module_name = "module3"
 

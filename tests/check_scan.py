@@ -51,6 +51,14 @@ def run_scan(ref, r1, r2, outdir, extra=()):
         return list(csv.DictReader(f, delimiter="\t"))
 
 
+def run_population(ref, r1, r2, metadata, outdir):
+    subprocess.run(["tandem", "-r", ref, "-i", r1, "-I", r2, "-pop", "-m", metadata,
+                    "-o", outdir], check=True, capture_output=True)
+    with open(os.path.join(outdir, "junction_quantification.tsv")) as f:
+        lines = [line for line in f if not line.startswith("#")]
+    return list(csv.DictReader(lines, delimiter="\t"))
+
+
 def near(row, seq_id, start, end, slop=5):
     return (row["seq_id"] == seq_id
             and abs(int(row["start"]) - start) <= slop
@@ -128,6 +136,25 @@ def main(work):
           and int(rows[0]["control_reads"]) > 0)
     detail = f"control_reads {rows[0]['control_reads']}" if rows else "not found"
     results.append(("junction also in the control is marked", ok, detail))
+
+    # 6. Population mode at known coordinates, on the reads from case 1: the
+    #    junction as given, the same 6 bp off, and a stretch with no
+    #    duplication. The first two are one junction and must agree.
+    metadata = os.path.join(work, "known.tsv")
+    with open(metadata, "w") as f:
+        f.write("given\t50000\t60000\nshifted\t50006\t60006\nabsent\t120000\t125000\n")
+    rows = {r["name"]: r for r in run_population(
+        chrom_fa, os.path.join(work, "circ_R1.fq"), os.path.join(work, "circ_R2.fq"),
+        metadata, os.path.join(work, "out_pop"))}
+    given, shifted, absent = rows.get("given"), rows.get("shifted"), rows.get("absent")
+    ok = (given is not None and shifted is not None and absent is not None
+          and int(given["junction_reads"]) > 0
+          and 0.2 <= float(given["dosage"]) <= 0.6
+          and (shifted["dup_start"], shifted["dosage"]) == (given["dup_start"], given["dosage"])
+          and int(absent["junction_reads"]) == 0 and float(absent["dosage"]) == 0)
+    detail = (f"dosage {given['dosage']} (truth 0.4), off-by-6 {shifted['dosage']}, "
+              f"absent {absent['dosage']}") if ok or (given and shifted and absent) else "missing rows"
+    results.append(("population mode at known junctions", ok, detail))
 
     failed = 0
     for name, ok, detail in results:

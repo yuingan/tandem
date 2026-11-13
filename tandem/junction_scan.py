@@ -139,13 +139,18 @@ def _exact_junction(read, ref, diag_left, diag_right, lo, hi):
 
 def scan(ref_seq, read_paths, k=ANCHOR_K, stride=STRIDE,
          min_anchor=MIN_ANCHOR, min_support=MIN_SUPPORT, min_size=MIN_SIZE,
-         index=None, contig_start=0, threads=1):
+         index=None, contig_start=0, threads=1, targets=None, slop=20):
     """Junctions with support counts. Coordinates are 1-based inclusive.
 
     With a shared index over several contigs, contig_start is where ref_seq
     begins in that index (KmerIndex._seq_offsets). With threads > 1 blocks of
     reads go to worker processes; results are merged in file order, so the
     output does not depend on the thread count.
+
+    targets: (start, end) of known duplicated units. Instead of the junctions
+    found, each target is measured, in order, whatever its support: at the
+    best-supported junction within slop bases of both ends, or where it is
+    if no read crosses it.
     """
     if index is None:
         index = KmerIndex({"ref": ref_seq}, min_k=k)
@@ -200,10 +205,7 @@ def scan(ref_seq, read_paths, k=ANCHOR_K, stride=STRIDE,
     read_len = int(np.median(lens)) if len(lens) else 150
     logger.info(f"  Median read length {read_len} bp")
 
-    results = []
-    for (start0, end0), support in sorted(votes.items(), key=lambda kv: -kv[1]):
-        if support < min_support:
-            continue
+    def measure(start0, end0, support):
         ref_count = _count_reference_reads(diags, lens, firsts, lasts,
                                            end0 + 1, min_anchor, k)
         mh = _homology(start0, end0, ref_seq)
@@ -215,7 +217,7 @@ def scan(ref_seq, read_paths, k=ANCHOR_K, stride=STRIDE,
 
         raw = support / ref_count if ref_count else None
         fixed = raw * can_r / can_j if raw is not None and can_j else None
-        results.append({
+        return {
             "start": start0 + 1,
             "end": end0 + 1,
             "size": end0 - start0 + 1,
@@ -227,8 +229,24 @@ def scan(ref_seq, read_paths, k=ANCHOR_K, stride=STRIDE,
             "junction_visible": round(can_j / most, 3),
             "reference_visible": round(can_r / most, 3),
             "depth_dosage": _depth_dosage(depth, start0, end0),
-        })
-    return results
+        }
+
+    if targets is not None:
+        measured = []
+        for start, end in targets:
+            start0, end0, _ = left_align(start - 1, end - 1, ref_seq)
+            near = [(n, -abs(s - start0) - abs(e - end0), s, e)
+                    for (s, e), n in votes.items()
+                    if abs(s - start0) <= slop and abs(e - end0) <= slop]
+            support = 0
+            if near:
+                support, _, start0, end0 = max(near)
+            measured.append(measure(start0, end0, support))
+        return measured
+
+    return [measure(start0, end0, support)
+            for (start0, end0), support in sorted(votes.items(), key=lambda kv: -kv[1])
+            if support >= min_support]
 
 
 _SHARED = {}    # what _scan_chunk needs; set by scan() before workers fork

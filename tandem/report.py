@@ -184,8 +184,10 @@ def _build_module3_table(results):
 
     rows = []
     for i, r in enumerate(results):
-        jrr = r.get("JRR", 0)
-        jrr_class = "jrr-high" if jrr > 0.1 else "jrr-med" if jrr > 0.01 else "jrr-low"
+        dosage = r.get("dosage")
+        level = dosage or 0
+        dosage_class = "jrr-high" if level > 0.1 else "jrr-med" if level > 0.01 else "jrr-low"
+        shown = "–" if dosage is None else f"{dosage:.4f}"
 
         row = f"""
         <tr class="clickable-row" data-target="detail-{i}">
@@ -195,17 +197,18 @@ def _build_module3_table(results):
             <td>{r.get('dup_start', 0):,}</td>
             <td>{r.get('dup_end', 0):,}</td>
             <td>{r.get('dup_size', 0):,} bp</td>
-            <td>{r.get('spanning_reads', 0)}</td>
-            <td>{r.get('wt_mean_coverage', 0):.1f}x</td>
-            <td class="{jrr_class}">{jrr:.4f}</td>
+            <td>{r.get('junction_reads', 0)}</td>
+            <td>{r.get('reference_reads', 0)}</td>
+            <td class="{dosage_class}">{shown}</td>
         </tr>"""
         rows.append(row)
 
     return f"""
     <div class="jrr-note">
-        <strong>JRR (Junction Read Ratio)</strong> is proportional to duplication
-        prevalence but is <em>not</em> an absolute allele frequency. It is best
-        suited for comparing relative abundance across time-series samples.
+        <strong>Dosage</strong> is junction reads over reference reads at the
+        same boundary, each corrected for the read placements that can be
+        counted there. It estimates the extra copies per cell; for a duplication
+        adding one copy, the share of cells that carry it.
     </div>
     <table class="results-table" id="summary-table">
         <thead>
@@ -216,9 +219,9 @@ def _build_module3_table(results):
                 <th>Dup Start</th>
                 <th>Dup End</th>
                 <th>Size</th>
-                <th>Spanning Reads</th>
-                <th>WT Coverage</th>
-                <th>JRR</th>
+                <th>Junction Reads</th>
+                <th>Reference Reads</th>
+                <th>Dosage</th>
             </tr>
         </thead>
         <tbody>
@@ -365,10 +368,11 @@ def _build_module2_details(results):
 
 def _build_module3_details(results):
     """Build detail panels for module 3."""
+    def num(value, fmt="{:.4f}"):
+        return "–" if value is None else fmt.format(value)
+
     panels = []
     for i, r in enumerate(results):
-        jrr = r.get("JRR", 0)
-
         panel = f"""
         <div class="detail-panel" id="detail-{i}" style="display:none;">
             <h3>Junction: {r.get('name', '')} ({r.get('seq_id', '')}:{r.get('dup_start', 0):,}-{r.get('dup_end', 0):,})</h3>
@@ -378,30 +382,29 @@ def _build_module3_details(results):
                     <span>{r.get('dup_size', 0):,} bp</span>
                 </div>
                 <div class="detail-item">
-                    <label>Junction k</label>
-                    <span>{r.get('junction_k', 0)} bp each side</span>
+                    <label>Junction Reads</label>
+                    <span>{r.get('junction_reads', 0)}</span>
                 </div>
                 <div class="detail-item">
-                    <label>Spanning Reads</label>
-                    <span>{r.get('spanning_reads', 0)}</span>
+                    <label>Reference Reads</label>
+                    <span>{r.get('reference_reads', 0)}</span>
                 </div>
                 <div class="detail-item">
-                    <label>HQ Reads</label>
-                    <span>{r.get('hq_reads', 0)}</span>
+                    <label>Dosage Before Correction</label>
+                    <span>{num(r.get('dosage_raw'))}</span>
                 </div>
                 <div class="detail-item">
-                    <label>WT Coverage</label>
-                    <span>{r.get('wt_mean_coverage', 0):.1f}x</span>
+                    <label>Dosage From Depth</label>
+                    <span>{num(r.get('depth_dosage'))}</span>
                 </div>
                 <div class="detail-item jrr-detail">
-                    <label>Junction Read Ratio (JRR)</label>
-                    <span class="jrr-value">{jrr:.6f}</span>
+                    <label>Dosage</label>
+                    <span class="jrr-value">{num(r.get('dosage'))}</span>
                 </div>
             </div>
             <div class="jrr-interpretation">
-                <p>This JRR value indicates the relative abundance of this duplication
-                junction in the population. Compare across time-series samples to
-                track duplication dynamics.</p>
+                <p>Extra copies per cell. For a duplication adding one copy, this
+                is the share of cells that carry it.</p>
             </div>
             <button class="back-btn" onclick="hideDetail({i})">← Back to summary</button>
         </div>"""
