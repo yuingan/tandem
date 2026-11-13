@@ -386,6 +386,15 @@ def _validate_args(args, parser):
 
 def main(argv=None):
     """Main entry point for Tandem."""
+    from .junction_scan import FastqError
+    try:
+        return _run(argv)
+    except FastqError as e:
+        print(f"\nError: {e}", file=sys.stderr)
+        sys.exit(1)
+
+
+def _run(argv=None):
     args = parse_args(argv)
 
     # Setup logging

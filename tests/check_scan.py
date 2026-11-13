@@ -245,6 +245,21 @@ def main(work):
     detail = (f"depth {r['depth_dosage']}, noise {r['depth_noise']} (truth 0)") if r else "no row"
     results.append(("repeat in the depth baseline", ok, detail))
 
+    # 11. A FASTQ file with one broken record (a read whose + line is missing)
+    #     must stop the run and say where, not lose the rest of the file.
+    broken = os.path.join(work, "broken_R2.fq")
+    with open(os.path.join(work, "circ_R2.fq")) as f:
+        lines = f.readlines()
+    del lines[4002]                     # the + line of read 1001
+    with open(broken, "w") as f:
+        f.writelines(lines)
+    run = subprocess.run(["tandem", "-r", chrom_fa, "-i", os.path.join(work, "circ_R1.fq"),
+                          "-I", broken, "-iso", "-o", os.path.join(work, "out_broken")],
+                         capture_output=True, text=True)
+    ok = run.returncode != 0 and "line 4003" in run.stderr
+    detail = run.stderr.strip().splitlines()[-1][:70] if run.stderr.strip() else "no error"
+    results.append(("broken FASTQ record stops the run", ok, detail))
+
     failed = 0
     for name, ok, detail in results:
         print(f"  {'PASS' if ok else 'FAIL'}  {name:<42} {detail}")

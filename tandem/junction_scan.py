@@ -55,20 +55,48 @@ def _open(path):
     return open(path)
 
 
+class FastqError(ValueError):
+    pass
+
+
 def read_chunks(paths, chunk=CHUNK_READS):
-    """Yield lists of read sequences from one or more FASTQ files."""
+    """Yield lists of read sequences from one or more FASTQ files.
+
+    Every record is checked on the way past: a header starting with @, a
+    separator starting with +, as many quality values as bases. One broken
+    record would otherwise put every later line out of step, and the rest of
+    the file would be lost without a word.
+    """
     batch = []
     for path in paths:
         if path is None:
             continue
         with _open(path) as f:
-            for i, line in enumerate(f):
-                if i % 4 != 1:
-                    continue
-                batch.append(line.strip().upper())
-                if len(batch) >= chunk:
-                    yield batch
-                    batch = []
+            part, seq = 0, ""
+            for n, line in enumerate(f, 1):
+                if part == 0:
+                    if not line.strip():
+                        continue                # blank lines between records
+                    if not line.startswith("@"):
+                        raise FastqError(f"{path}, line {n}: expected a read header "
+                                         f"starting with @, found {line[:40].rstrip()!r}")
+                elif part == 1:
+                    seq = line.strip()
+                elif part == 2:
+                    if not line.startswith("+"):
+                        raise FastqError(f"{path}, line {n}: expected the + line of a "
+                                         f"read, found {line[:40].rstrip()!r}")
+                else:
+                    if len(line.strip()) != len(seq):
+                        raise FastqError(f"{path}, line {n}: {len(seq)} bases but "
+                                         f"{len(line.strip())} quality values")
+                    batch.append(seq.upper())
+                    if len(batch) >= chunk:
+                        yield batch
+                        batch = []
+                part = (part + 1) % 4
+            if part:
+                raise FastqError(f"{path}: the last read is incomplete")
     if batch:
         yield batch
 
@@ -391,7 +419,15 @@ def _ratio_interval(j, r, z=1.96):
     return lo / (1 - lo), (hi / (1 - hi) if hi < 1 else math.inf)
 
 
-def _depth_dosage(depth, start0, end0, unique=None, windows=10, longest=50_000):
+def _centre(values):
+    """Mean of the middle half: robust like a median, but not stuck on whole
+    numbers, which would make neighbouring windows tie and the noise read 0."""
+    lo, hi = np.percentile(values, [25, 75])
+    middle = values[(values >= lo) & (values <= hi)]
+    return float(middle.mean()) if len(middle) else float(np.median(values))
+
+
+def _depth_dosage(depth, start0, end0, unique=None, windows=30, longest=50_000):
     """Same quantity as the junction ratio, from coverage instead, and its noise.
 
     Depth inside a duplicated interval is 1 + f(n-1) times the depth outside,
@@ -403,7 +439,8 @@ def _depth_dosage(depth, start0, end0, unique=None, windows=10, longest=50_000):
     The noise is how far the same statistic strays where nothing is
     duplicated: unit-sized windows are laid end to end beyond the baseline, up
     to `windows` on each side, and each is set against its two neighbours as
-    the unit is against its flanks.
+    the unit is against its flanks. On simulated coverage it matches the
+    spread of the estimate itself from 1.5 to 45 kb.
     """
     def take(a, b):
         a, b = max(a, 0), min(b, len(depth))
@@ -424,11 +461,10 @@ def _depth_dosage(depth, start0, end0, unique=None, windows=10, longest=50_000):
                               take(end0 + 1 + margin, right_to)])
     if len(inside) < margin or len(outside) < margin:
         return None, None
-    # median as well: what repeats remain shouldn't pull it
-    base = float(np.median(outside))
+    base = _centre(outside)
     if base == 0:
         return None, None
-    dosage = round(float(np.median(inside)) / base - 1.0, 4)
+    dosage = round(_centre(inside) / base - 1.0, 4)
 
     w = min(span - 2 * margin, longest)
     null = []
@@ -437,9 +473,9 @@ def _depth_dosage(depth, start0, end0, unique=None, windows=10, longest=50_000):
         tiles = [take(a, a + w) for a in starts if 0 <= a and a + w <= len(depth)]
         tiles = [t for t in tiles if len(t) >= margin]
         for prev, tile, nxt in zip(tiles, tiles[1:], tiles[2:]):
-            flank = float(np.median(np.concatenate([prev, nxt])))
+            flank = _centre(np.concatenate([prev, nxt]))
             if flank > 0:
-                null.append(float(np.median(tile)) / flank - 1.0)
+                null.append(_centre(tile) / flank - 1.0)
     if len(null) < 5:
         return dosage, None
     # robust spread: another duplication among the windows shouldn't count
