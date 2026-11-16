@@ -15,7 +15,10 @@ generator gives the wild type coverage x (1 - sum of mutant frequencies),
 floored at 0, and each mutant coverage x its frequency, so where the
 frequencies of a day add up to more than 1 there is no wild type and each
 mutant's share is its frequency over that sum. --labels-as-written scores
-against the frequencies as written instead.
+against the frequencies as written instead. --read-counts takes the shares
+from the reads themselves: a table of reads per source genome (population,
+source, count), counted from the read names. That also catches a population
+whose reads did not come out as the frequencies say.
 
 Per species, per mechanism and overall:
 
@@ -41,6 +44,7 @@ distance from each of its ends to the nearest mutant boundary.
 
 import argparse
 import csv
+import glob
 import json
 import os
 import sys
@@ -104,7 +108,58 @@ def nearest_end(truth, pos):
     return f"{distance:,} bp from the {side} of {mutant}"
 
 
-def load_points(gt_dir, results_dir, labels_as_written=False):
+def chromosome(ref_dir, species):
+    """Name and length of the longest sequence in the species' reference."""
+    paths = sorted(glob.glob(os.path.join(ref_dir, species + "*", "*.fna")))
+    if not paths:
+        sys.exit(f"No reference for {species} under {ref_dir}")
+    lengths, name = {}, None
+    with open(paths[0]) as f:
+        for line in f:
+            if line.startswith(">"):
+                name = line[1:].split()[0]
+                lengths[name] = 0
+            else:
+                lengths[name] += len(line.strip())
+    name = max(lengths, key=lengths.get)
+    return name, lengths[name]
+
+
+def read_count_shares(path, gt_dir, ref_dir):
+    """Each mutant's share of the genomes in the reads, from reads per source.
+
+    A genome's reads over its length, chromosome plus duplication, give its
+    coverage, and the shares are those coverages over their sum. Plasmids are
+    simulated once at full coverage, so they are left out.
+    """
+    reads = {}
+    with open(path) as f:
+        for line in f:
+            if not line.strip():
+                continue
+            population, source, n = line.rstrip("\n").split("\t")
+            species, day = population.rsplit("_day", 1)
+            reads.setdefault((species, int(day)), {})[source] = int(n)
+    shares, chromosomes = {}, {}
+    for (species, day), counts in reads.items():
+        gt_path = os.path.join(gt_dir, species, "ground_truth.json")
+        if not os.path.isfile(gt_path):
+            continue
+        if species not in chromosomes:
+            chromosomes[species] = chromosome(ref_dir, species)
+        name, length = chromosomes[species]
+        with open(gt_path) as f:
+            size = {t["mutant_id"]: int(t["dup_size"]) for t in json.load(f)}
+        wild = counts.get(name, 0) / length
+        coverage = {mutant: counts.get(f"{name}_{mutant}", 0) / (length + dup)
+                    for mutant, dup in size.items()}
+        total = wild + sum(coverage.values())
+        for mutant, c in coverage.items():
+            shares[(species, day, mutant)] = c / total if total else 0.0
+    return shares
+
+
+def load_points(gt_dir, results_dir, labels_as_written=False, shares=None):
     points, columns, missing, unmatched = [], set(), [], []
     for species in sorted(os.listdir(gt_dir)):
         gt_path = os.path.join(gt_dir, species, "ground_truth.json")
@@ -143,7 +198,8 @@ def load_points(gt_dir, results_dir, labels_as_written=False):
                     "dup_size": t.get("dup_size", ""),
                     "day": day,
                     "label": label[t["mutant_id"]],
-                    "true": round(label[t["mutant_id"]] / scale, 4),
+                    "true": round(label[t["mutant_id"]] / scale if shares is None
+                                  else shares.get((species, day, t["mutant_id"]), 0.0), 4),
                     "estimate": r.get("estimate"),
                     "source": r.get("source", ""),
                     "junction": r.get("junction"),
@@ -262,15 +318,25 @@ def main():
     ap.add_argument("--results-dir", required=True)
     ap.add_argument("--labels-as-written", action="store_true",
                     help="score against the frequencies as written, not the shares simulated")
+    ap.add_argument("--read-counts", metavar="TSV",
+                    help="reads per source genome (population, source, count); the "
+                         "truth is then each mutant's share of the genomes in the reads")
+    ap.add_argument("--ref-dir", default="genome/pop_ncbi_ref",
+                    help="references, for chromosome lengths with --read-counts")
     args = ap.parse_args()
 
+    shares = None
+    if args.read_counts and not args.labels_as_written:
+        shares = read_count_shares(args.read_counts, args.gt_dir, args.ref_dir)
     points, columns, missing, unmatched = load_points(args.gt_dir, args.results_dir,
-                                                      args.labels_as_written)
+                                                      args.labels_as_written, shares)
     if not points:
         sys.exit(f"No results found under {args.results_dir}")
     print(f"Scored column: {', '.join(sorted(columns))}")
     if args.labels_as_written:
         print("Truth: the frequencies as written in ground_truth.json")
+    elif shares is not None:
+        print(f"Truth: each mutant's share of the genomes in the reads ({args.read_counts})")
     else:
         rescaled = sorted({(p["species"], p["day"]) for p in points if p["true"] != p["label"]})
         days = sorted({d for _, d in rescaled})

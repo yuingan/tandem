@@ -5,9 +5,10 @@
 Covers the cases real data throws at the scanner: reads running across the
 origin of a circular chromosome, a duplication on a second contig, a small
 indel that should stay below the size floor, a repeat right beside the
-junction, background marked from a control sample, boundaries given only
-roughly, and a junction no read can cross. Prints PASS/FAIL per case and
-exits non-zero if anything failed.
+junction, long microhomology at the junction, background marked from a
+control sample, boundaries given only roughly, a junction with a repeat at
+one end, and one no read can cross.
+Prints PASS/FAIL per case and exits non-zero if anything failed.
 """
 
 import csv
@@ -140,6 +141,23 @@ def main(work):
               f"(truth 0.5)") if rows else "not found"
     results.append(("repeat beside the junction, f=0.5", ok, detail))
 
+    # 4b. 12 bp of microhomology: the bases after the unit repeat its first 12,
+    #     so a read's anchors on the two sides overlap across the junction and
+    #     the junction must be placed between them all the same.
+    random.seed(19)
+    base = list("".join(random.choice("ACGT") for _ in range(300_000)))
+    base[110000:110012] = base[100000:100012]
+    mh_fa = os.path.join(work, "microhomology_12.fna")
+    write_fasta(mh_fa, [("chrom", "".join(base))])
+    r1, r2 = simulate(mh_fa, os.path.join(work, "mh12"), 100001, 110000, 0.5, 20)
+    rows = [r for r in run_scan(mh_fa, r1, r2, os.path.join(work, "out_mh12"))
+            if near(r, "chrom", 100001, 110000, slop=20)]
+    ok = (len(rows) == 1 and int(rows[0]["microhomology"]) >= 12
+          and 0.3 <= float(rows[0]["dosage"]) <= 0.7)
+    detail = (f"{rows[0]['junction_reads']} reads, microhomology {rows[0]['microhomology']}, "
+              f"dosage {rows[0]['dosage']} (truth 0.5)") if rows else "not found"
+    results.append(("12 bp microhomology at the junction", ok, detail))
+
     # 5. A junction that is also in the control is marked with its support there.
     c1, c2 = simulate(chrom_fa, os.path.join(work, "ctrl"), 50000, 60000, 0.2, 16)
     ctrl_rows = run_scan(chrom_fa, c1, c2, os.path.join(work, "out_ctrl"),
@@ -172,8 +190,19 @@ def main(work):
               f"absent {absent['dosage']}") if ok or (given and shifted and absent) else "missing rows"
     results.append(("population mode at known junctions", ok, detail))
 
+    # At a known junction a read needs an anchor on one side only, so more
+    # reads count than in the scan, which has to find the junction first.
+    ok = (given is not None and len(circ) == 1
+          and int(given["junction_reads"]) > int(circ[0]["junction_reads"])
+          and int(given["reference_reads"]) > int(circ[0]["reference_reads"]))
+    detail = (f"{given['junction_reads']}/{given['reference_reads']} reads, "
+              f"scan {circ[0]['junction_reads']}/{circ[0]['reference_reads']}"
+              if given is not None and circ else "missing rows")
+    results.append(("known junction counts more reads", ok, detail))
+
     # 7. Isolate mode with boundaries read off a coverage plot, 150 bp out: every
-    #    start paired with every end after it, each reported once.
+    #    start paired with every end after it, each reported once, and the
+    #    junction counted as population mode counts it.
     out = os.path.join(work, "out_iso_given")
     subprocess.run(["tandem", "-r", chrom_fa, "-i", os.path.join(work, "circ_R1.fq"),
                     "-I", os.path.join(work, "circ_R2.fq"), "-iso",
@@ -185,21 +214,42 @@ def main(work):
     hit = rows.get((49850, 60150))
     others = [r for key, r in rows.items() if key != (49850, 60150)]
     ok = (hit is not None and near(hit, "chrom", 50000, 60000)
-          and circ and hit["junction_reads"] == circ[0]["junction_reads"]
+          and given is not None and hit["junction_reads"] == given["junction_reads"]
           and len(others) == 2 and all(int(r["junction_reads"]) == 0 for r in others))
     detail = (f"{hit['start']}-{hit['end']}, {hit['junction_reads']} reads; "
               f"{len(others)} other pair(s) without reads") if hit else f"{len(rows)} row(s)"
     results.append(("isolate mode with -s/-e, 150 bp out", ok, detail))
 
-    # 8. The first 400 bp of the unit also occur elsewhere, longer than a read:
-    #    no read can be placed across the junction, so the dosage comes from
-    #    depth.
+    # 8. The first 400 bp of the unit also occur elsewhere, longer than a read.
+    #    No read across the junction has unique sequence on both sides, so the
+    #    scan cannot find it; at the known junction, reads anchored on the
+    #    unit's end are called by the bases they carry past it.
     random.seed(13)
     base = list("".join(random.choice("ACGT") for _ in range(300_000)))
     base[200000:200400] = base[100000:100400]
-    hidden_fa = os.path.join(work, "repeat_400_at_start.fna")
+    one_fa = os.path.join(work, "repeat_400_at_start.fna")
+    write_fasta(one_fa, [("chrom", "".join(base))])
+    h1, h2 = simulate(one_fa, os.path.join(work, "one_side"), 100001, 110000, 0.5, 17)
+    metadata = os.path.join(work, "one_side.tsv")
+    with open(metadata, "w") as f:
+        f.write("one_side\t100001\t110000\n")
+    rows = run_population(one_fa, h1, h2, metadata, os.path.join(work, "out_one_side"))
+    found = [r for r in run_scan(one_fa, h1, h2, os.path.join(work, "out_one_side_scan"))
+             if near(r, "chrom", 100001, 110000)]
+    r = rows[0] if rows else None
+    ok = (r is not None and not found and r["dosage_from"] == "junction"
+          and int(r["junction_reads"]) > 0 and 0.35 <= float(r["dosage"]) <= 0.65)
+    detail = (f"scan found {len(found)}; known: {r['junction_reads']} reads, dosage "
+              f"{r['dosage']} from {r['dosage_from']} (truth 0.5)") if r else "no row"
+    results.append(("repeat at one end: counted from the other", ok, detail))
+
+    # 8b. Both ends of the unit also occur elsewhere: no read across the
+    #     junction can be placed from either side, so the dosage comes from
+    #     depth.
+    base[210000:210400] = base[109600:110000]
+    hidden_fa = os.path.join(work, "repeat_400_both_ends.fna")
     write_fasta(hidden_fa, [("chrom", "".join(base))])
-    h1, h2 = simulate(hidden_fa, os.path.join(work, "hidden"), 100001, 110000, 0.5, 17)
+    h1, h2 = simulate(hidden_fa, os.path.join(work, "hidden"), 100001, 110000, 0.5, 18)
     metadata = os.path.join(work, "hidden.tsv")
     with open(metadata, "w") as f:
         f.write("hidden\t100001\t110000\n")
@@ -209,7 +259,7 @@ def main(work):
           and r["dosage_from"] == "depth" and 0.35 <= float(r["dosage"]) <= 0.65)
     detail = (f"junction visible {r['junction_visible']}, dosage {r['dosage']} from "
               f"{r['dosage_from']} (truth 0.5)") if r else "no row"
-    results.append(("junction inside a repeat: depth instead", ok, detail))
+    results.append(("repeats at both ends: depth instead", ok, detail))
     hidden = r
 
     # 9. Every estimate comes with an interval around it: from the read counts

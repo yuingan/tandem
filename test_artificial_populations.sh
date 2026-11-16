@@ -10,7 +10,8 @@
 # duplications are found without being named (SCAN=0 skips this).
 # The reference is the .fna under REF_DIR/<species>*/. Results go to
 # module3_v<version>_benchmark/, named after the installed tandem so an old
-# run is never overwritten.
+# run is never overwritten. READ_COUNTS=<reads per source genome, as counted
+# from the read names> scores against the shares in the reads (see the scorer).
 
 set -euo pipefail
 shopt -s nullglob
@@ -75,8 +76,10 @@ for gt in "$ART_DIR"/*/ground_truth.json; do
 done
 
 echo
+truth=()
+[ -n "${READ_COUNTS:-}" ] && truth=(--read-counts "$READ_COUNTS" --ref-dir "$REF_DIR")
 python "$HERE/tests/score_artificial_populations.py" --gt-dir "$ART_DIR" \
-    --results-dir "$OUT" | tee "$OUT/summary.txt"
+    --results-dir "$OUT" "${truth[@]}" | tee "$OUT/summary.txt"
 
 if [ ${#FAILED[@]} -gt 0 ]; then
     echo "FAILED: ${FAILED[*]}" >&2

@@ -536,7 +536,7 @@ def _build_module3_table(results):
     return f"""
     <div class="jrr-note">
         <strong>Dosage</strong> is junction reads over reference reads at the
-        same boundary, each corrected for the read placements that can be
+        unit's two ends, each corrected for the read placements that can be
         counted there. It estimates the extra copies per cell; for a duplication
         adding one copy, the share of cells that carry it. Where no read can be
         placed across the junction, it comes from depth instead.

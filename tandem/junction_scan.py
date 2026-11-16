@@ -16,10 +16,23 @@ Both kinds of read count only with a unique anchor wholly on each side of
 the boundary they cross. Otherwise a junction read whose far side sits in a
 repeat keeps anchors on one side only and passes for a reference read.
 
+Where the junction is already known (-pop, or -s/-e) one anchored side is
+enough. A read anchored before the unit's last base shows, in the bases it
+carries past that point, whether the sequence runs on into the reference or
+across the junction into the unit's first bases; a read anchored after the
+unit's first base shows the same in the bases before it. A few bases that
+tell the two apart settle it (MIN_DIFF), so reads that only just cross the
+junction count, and so do reads whose far side sits in a repeat longer than
+a read, which the scan cannot place at all. Such a read would fit equally a
+junction joining the same end to another copy of that repeat; at a known
+junction it is taken to belong there. Reference reads are counted at both
+ends of the unit.
+
 Next to a repeat the two counts still lose different shares of their reads,
-so each is divided by the number of read placements the scan could have
-counted at that spot, worked out from the reference (_countable). The
-uncorrected ratio is kept as dosage_raw.
+so each is divided by the number of read placements that could have been
+counted at that spot, worked out from the reference (_countable, or
+_placements at a known junction). The ratio corrected only for the
+placements possible in unique sequence is kept as dosage_raw.
 
 dosage_low and dosage_high bound a 95% interval: for the junction ratio from
 the two counts, for depth from how much the same depth statistic moves where
@@ -44,6 +57,7 @@ STRIDE = 8           # spacing between anchors along a read
 MIN_ANCHOR = 25      # bases required either side of a junction
 MIN_SUPPORT = 2      # reads needed before a junction is reported
 MIN_SIZE = 200       # smaller "duplications" are mostly indels; same floor as module 1
+MIN_DIFF = 3         # bases past a known boundary that must side with one way out
 ORIGIN_SLOP = 1000   # see _vote
 CHUNK_READS = 100_000
 
@@ -183,19 +197,25 @@ def scan(ref_seq, read_paths, k=ANCHOR_K, stride=STRIDE,
     targets: (start, end) of known duplicated units. Instead of the junctions
     found, each target is measured, in order, whatever its support: at the
     best-supported junction within slop bases of both ends, or where it is
-    if no read crosses it.
+    if no read crosses it. Reads are counted there by the rule for known
+    junctions (_count_known).
     """
     if index is None:
         index = KmerIndex({"ref": ref_seq}, min_k=k)
         contig_start = 0
     k = index.k
     index.anchor_table()          # build once here, before any worker forks
+    given = None
+    if targets is not None:
+        given = [left_align(start - 1, end - 1, ref_seq)[:2] for start, end in targets]
     _SHARED.update(index=index, ref_seq=ref_seq, k=k, stride=stride,
                    contig_start=contig_start, contig_end=contig_start + len(ref_seq),
-                   min_anchor=min_anchor, min_size=min_size)
+                   min_anchor=min_anchor, min_size=min_size,
+                   zones=_zones(given, slop) if given else None)
 
     votes = {}
     parts = {"diag": [], "len": [], "first": [], "last": []}
+    kept = []                     # reads across a known junction's ends
     depth_delta = np.zeros(len(ref_seq) + 2, dtype=np.int32)
     n_reads = 0
     next_report = 1_000_000
@@ -203,12 +223,13 @@ def scan(ref_seq, read_paths, k=ANCHOR_K, stride=STRIDE,
 
     def merge(result):
         nonlocal n_reads, next_report
-        n, chunk_votes, arrays = result
+        n, chunk_votes, arrays, chunk_kept = result
         n_reads += n
         for key, v in chunk_votes.items():
             votes[key] = votes.get(key, 0) + v
         for key in parts:
             parts[key].append(arrays[key])
+        kept.extend(chunk_kept)
         np.add.at(depth_delta, np.clip(arrays["diag"], 0, len(ref_seq)), 1)
         np.add.at(depth_delta, np.clip(arrays["diag"] + arrays["len"], 0, len(ref_seq)), -1)
         if n_reads >= next_report:
@@ -238,22 +259,18 @@ def scan(ref_seq, read_paths, k=ANCHOR_K, stride=STRIDE,
     read_len = int(np.median(lens)) if len(lens) else 150
     logger.info(f"  Median read length {read_len} bp")
 
-    def measure(start0, end0, support):
-        ref_count = _count_reference_reads(diags, lens, firsts, lasts,
-                                           end0 + 1, min_anchor, k)
-        mh = _homology(start0, end0, ref_seq)
-        uniq = _uniqueness(ref_seq, index, k, [(end0 - read_len, end0 + read_len),
+    def uniqueness(start0, end0):
+        return _uniqueness(ref_seq, index, k, [(end0 - read_len, end0 + read_len),
                                                (start0 - read_len, start0 + read_len)])
-        can_j = _countable(uniq, end0, start0, read_len, min_anchor, k, stride, mh)
-        can_r = _countable(uniq, end0, end0 + 1, read_len, min_anchor, k, stride)
-        most = read_len - 2 * min_anchor + 1     # placements with no repeats around
 
-        raw = support / ref_count if ref_count else None
-        fixed = raw * can_r / can_j if raw is not None and can_j else None
+    def estimate(start0, end0, mh, support, ref_count, can_j, can_r, most_j, most_r):
+        """The dosage from the two counts and the placements behind each:
+        can_* those countable here, most_* those countable in unique sequence."""
+        raw = support / ref_count * most_r / most_j if ref_count else None
+        fixed = support / ref_count * can_r / can_j if ref_count and can_j else None
         from_depth, noise = _depth_dosage(
             depth, start0, end0, unique=lambda a, b: _unique_mask(ref_seq, index, k, a, b))
-        # When no read can be placed on both sides of the junction (one end of
-        # the unit inside a repeat longer than a read) or of the reference
+        # When no read can be placed across the junction or the reference
         # boundary, the reads can't give a ratio; coverage still can.
         dosage, source, low, high = fixed, "junction", None, None
         if fixed is not None:
@@ -276,23 +293,46 @@ def scan(ref_seq, read_paths, k=ANCHOR_K, stride=STRIDE,
             "dosage_low": _round(low),
             "dosage_high": _round(high),
             "dosage_raw": _round(raw),
-            "junction_visible": round(can_j / most, 3),
-            "reference_visible": round(can_r / most, 3),
+            "junction_visible": round(can_j / most_j, 3),
+            "reference_visible": round(can_r / most_r, 3),
             "depth_dosage": from_depth,
             "depth_noise": noise,
         }
 
+    def measure(start0, end0, support):
+        ref_count = _count_reference_reads(diags, lens, firsts, lasts,
+                                           end0 + 1, min_anchor, k)
+        mh = _homology(start0, end0, ref_seq)
+        uniq = uniqueness(start0, end0)
+        can_j = _countable(uniq, end0, start0, read_len, min_anchor, k, stride, mh)
+        can_r = _countable(uniq, end0, end0 + 1, read_len, min_anchor, k, stride)
+        most = read_len - 2 * min_anchor + 1     # placements with no repeats around
+        return estimate(start0, end0, mh, support, ref_count, can_j, can_r, most, most)
+
     if targets is not None:
+        reads, groups = _kept_arrays(kept)
+        # every k-mer unique, every base past each end telling the ways out apart
+        apart = ("A" * SPLIT_WINDOW, "C" * SPLIT_WINDOW) * 2
+        most = _placements(lambda p: True, 0, 0, apart, read_len, min_anchor, k, stride, 0)
+
+        def measure_known(start0, end0):
+            mh = _homology(start0, end0, ref_seq)
+            ways = _ways_out(ref_seq, start0, end0)
+            support, at_end, at_start = _count_known(reads, groups, start0, end0,
+                                                     ways, min_anchor, k, mh)
+            can_j, can_r = _placements(uniqueness(start0, end0), start0, end0, ways,
+                                       read_len, min_anchor, k, stride, mh)
+            return estimate(start0, end0, mh, support, at_end + at_start,
+                            can_j, can_r, *most)
+
         measured = []
-        for start, end in targets:
-            start0, end0, _ = left_align(start - 1, end - 1, ref_seq)
+        for start0, end0 in given:
             near = [(n, -abs(s - start0) - abs(e - end0), s, e)
                     for (s, e), n in votes.items()
                     if abs(s - start0) <= slop and abs(e - end0) <= slop]
-            support = 0
             if near:
-                support, _, start0, end0 = max(near)
-            measured.append(measure(start0, end0, support))
+                _, _, start0, end0 = max(near)
+            measured.append(measure_known(start0, end0))
         return measured
 
     return [measure(start0, end0, support)
@@ -306,13 +346,16 @@ _SHARED = {}    # what _scan_chunk needs; set by scan() before workers fork
 def _scan_chunk(reads):
     """Anchor one block of reads (both strands) and vote for junctions.
 
-    Returns the read count, the votes, and the geometry of the reads that sit
-    on a single diagonal, which scan() needs for the reference count and depth.
+    Returns the read count, the votes, the geometry of the reads that sit on a
+    single diagonal, which scan() needs for the reference count and depth, and
+    with known junctions the reads running across their ends, each with its
+    anchors per diagonal.
     """
     sh = _SHARED
-    k, stride, ref_seq = sh["k"], sh["stride"], sh["ref_seq"]
+    k, stride, ref_seq, zones = sh["k"], sh["stride"], sh["ref_seq"], sh["zones"]
     votes = {}
     out = {"diag": [], "len": [], "first": [], "last": []}
+    kept = []
 
     for orientation in (0, 1):
         batch = reads if orientation == 0 else [reverse_complement(r) for r in reads]
@@ -335,15 +378,35 @@ def _scan_chunk(reads):
         out["first"].append(first[straight])
         out["last"].append(last[straight])
 
-        for i in np.nonzero(~straight)[0]:
+        if zones is not None:
+            single = np.nonzero(straight)[0]
+            across = _crossing(lo_diag[single], lengths[read_id[edges[single]]], zones)
+            for i in single[across]:
+                kept.append((batch[read_id[edges[i]]],
+                             ((int(lo_diag[i]), int(first[i]), int(last[i])),)))
+
+        others = np.nonzero(~straight)[0]
+        maybe = set()
+        if zones is not None and len(others):
+            # whatever diagonals a read has, they lie between its lowest and highest
+            span = hi_diag[others] - lo_diag[others] + lengths[read_id[edges[others]]]
+            maybe = set(others[_crossing(lo_diag[others], span, zones)].tolist())
+
+        for i in others:
             lo = edges[i]
             hi = edges[i + 1] if i + 1 < len(edges) else len(read_id)
-            _vote(votes, batch[read_id[lo]], ref_seq, diag[lo:hi], in_read[lo:hi],
+            read = batch[read_id[lo]]
+            _vote(votes, read, ref_seq, diag[lo:hi], in_read[lo:hi],
                   k, sh["min_anchor"], sh["min_size"])
+            if int(i) in maybe:
+                groups = _groups(diag[lo:hi], in_read[lo:hi])
+                on = np.array([g[0] for g in groups], dtype=np.int64)
+                if _crossing(on, np.full(len(on), len(read)), zones).any():
+                    kept.append((read, groups))
 
     empty = np.empty(0, np.int64)
     arrays = {key: (np.concatenate(v) if v else empty) for key, v in out.items()}
-    return len(reads), votes, arrays
+    return len(reads), votes, arrays, kept
 
 
 def _vote(votes, read, ref_seq, diags, in_read, k, min_anchor, min_size):
@@ -356,8 +419,12 @@ def _vote(votes, read, ref_seq, diags, in_read, k, min_anchor, min_size):
 
     on_left = in_read[diags == uniq[0]]
     on_right = in_read[diags == uniq[1]]
+    # Between the last anchor on the left and the first on the right. With
+    # microhomology longer than the anchor spacing the two overlap, and the
+    # junction can sit anywhere in the overlap; left_align settles it.
+    left_end, right_start = int(on_left.max()) + k, int(on_right.min())
     split = _exact_junction(read, ref_seq, uniq[0], uniq[1],
-                            int(on_left.max()) + k, int(on_right.min()))
+                            min(left_end, right_start), max(left_end, right_start))
     if split is None:
         return
 
@@ -544,3 +611,158 @@ def _count_reference_reads(diags, lengths, firsts, lasts, boundary_0, min_anchor
     ok = ((left >= min_anchor) & (lengths - left >= min_anchor)
           & (firsts + k <= left) & (lasts >= left))
     return int(ok.sum())
+
+
+# Known junctions. A boundary at b lies between bases b - 1 and b (0-based):
+# the unit's start is at start0, the base after its end at end0 + 1.
+
+def _zones(junctions, slop):
+    """Boundary positions a known junction can settle on, merged and sorted.
+
+    Each end may move by up to slop to the best-supported junction (scan).
+    """
+    spans = sorted([(s - slop, s + slop) for s, _ in junctions]
+                   + [(e + 1 - slop, e + 1 + slop) for _, e in junctions])
+    merged = [list(spans[0])]
+    for lo, hi in spans[1:]:
+        if lo <= merged[-1][1] + 1:
+            merged[-1][1] = max(merged[-1][1], hi)
+        else:
+            merged.append([lo, hi])
+    arr = np.array(merged, dtype=np.int64)
+    return arr[:, 0].copy(), arr[:, 1].copy()
+
+
+def _crossing(diags, lengths, zones):
+    """Which reads, given by diagonal and length, run across a boundary in zones."""
+    lo, hi = zones
+    i = np.searchsorted(hi, diags + 1)
+    inside = i < len(hi)
+    i = np.minimum(i, len(hi) - 1)
+    return inside & (lo[i] <= diags + lengths - 1)
+
+
+def _groups(diags, in_read):
+    """(diagonal, first anchor, last anchor) for each diagonal a read sits on."""
+    out = []
+    for d in dict.fromkeys(int(v) for v in diags):
+        on = in_read[diags == d]
+        out.append((d, int(on.min()), int(on.max())))
+    return tuple(out)
+
+
+def _kept_arrays(kept):
+    """The kept reads, and their anchors in columns, one row per read and
+    diagonal: read, diagonal, first anchor, last anchor, read length."""
+    reads = [seq for seq, _ in kept]
+    rows = [(i, d, first, last, len(seq))
+            for i, (seq, groups) in enumerate(kept) for d, first, last in groups]
+    if not rows:
+        return reads, (np.empty(0, np.int64),) * 5
+    arr = np.array(rows, dtype=np.int64)
+    return reads, tuple(arr[:, j] for j in range(5))
+
+
+def _ways_out(ref_seq, start0, end0, w=SPLIT_WINDOW):
+    """The two ways the sequence can run past each end of a known unit.
+
+    after_ref and after_junction: up to w bases on from the unit's last base,
+    into the reference or across the junction into the unit's first bases.
+    before_ref and before_junction: up to w bases leading up to the unit's
+    first base, from the reference or from the unit's end.
+    """
+    after_ref = ref_seq[end0 + 1:end0 + 1 + w]
+    after_junction = (ref_seq[start0:end0 + 1] + after_ref)[:len(after_ref)]
+    before_ref = ref_seq[max(0, start0 - w):start0]
+    before_junction = ref_seq[end0 + 1 - len(before_ref):end0 + 1]
+    return after_ref, after_junction, before_ref, before_junction
+
+
+def _follows(read, junction, reference):
+    """Which way out the read's bases follow, if they can tell: "junction",
+    "reference" or None.
+
+    Only positions where the two ways differ decide. At least MIN_DIFF must
+    side with one and none with the other, and the read may differ from the
+    one it follows at no more bases than a junction read may (_exact_junction).
+    """
+    for_j = for_r = off_j = off_r = 0
+    for x, a, b in zip(read, junction, reference):
+        off_j += x != a
+        off_r += x != b
+        if a != b:
+            for_j += x == a
+            for_r += x == b
+    if for_j >= MIN_DIFF and not for_r and off_j <= MAX_SPLIT_MISMATCH:
+        return "junction"
+    if for_r >= MIN_DIFF and not for_j and off_r <= MAX_SPLIT_MISMATCH:
+        return "reference"
+    return None
+
+
+def _count_known(reads, groups, start0, end0, ways, min_anchor, k, mh):
+    """Junction and reference reads at a junction whose position is known.
+
+    A read anchored before the unit's end, with min_anchor bases there, is
+    called by the bases it carries past the end; a read anchored after the
+    unit's start, with min_anchor bases there, by the bases it carries
+    before the start. A junction read anchored on both sides is counted
+    once. At a junction with microhomology the boundary is the left-aligned
+    one, and an anchor may run into the mh bases after it, which read the
+    same either way.
+
+    Returns the junction reads and the reference reads at the unit's end and
+    at its start.
+    """
+    after_ref, after_junction, before_ref, before_junction = ways
+    which, diag, first, last, length = groups
+    junction, at_end, at_start = set(), 0, 0
+
+    s = end0 + 1 - diag                  # bases of the read before the end
+    for i in np.nonzero((s >= min_anchor) & (s < length) & (first + k <= s + mh))[0]:
+        read, b = reads[which[i]], int(s[i])
+        w = min(len(read) - b, len(after_ref))
+        call = _follows(read[b:b + w], after_junction[:w], after_ref[:w])
+        if call == "junction":
+            junction.add(int(which[i]))
+        elif call == "reference":
+            at_end += 1
+
+    s = start0 - diag                    # bases of the read before the start
+    for i in np.nonzero((s > 0) & (length - s >= min_anchor) & (last >= s))[0]:
+        read, b = reads[which[i]], int(s[i])
+        w = min(b, len(before_ref))
+        call = _follows(read[b - w:b], before_junction[len(before_junction) - w:],
+                        before_ref[len(before_ref) - w:])
+        if call == "junction":
+            junction.add(int(which[i]))
+        elif call == "reference":
+            at_start += 1
+
+    return len(junction), at_end, at_start
+
+
+def _placements(uniq, start0, end0, ways, read_len, min_anchor, k, stride, mh):
+    """Read placements _count_known can count: (junction, reference).
+
+    A read with s bases before the junction counts if anchored on the unit's
+    end with min_anchor bases there and MIN_DIFF telling bases after it, or
+    the same way round on the unit's start. A reference read counts at
+    either end of the unit by the same rule, so the reference placements of
+    the two ends add up, while each junction placement counts once.
+    """
+    after_ref, after_junction, before_ref, before_junction = ways
+    # telling bases within the first n past the end, or the last n before the start
+    after = np.cumsum([0] + [a != b for a, b in zip(after_ref, after_junction)])
+    before = np.cumsum([0] + [a != b for a, b in
+                              zip(reversed(before_ref), reversed(before_junction))])
+    anchors = range(0, read_len - k + 1, stride)
+    junction = reference = 0
+    for s in range(1, read_len):
+        left = (s >= min_anchor and after[min(read_len - s, len(after) - 1)] >= MIN_DIFF
+                and any(uniq(end0 + 1 - s + o) for o in anchors if o + k <= s + mh))
+        right = (read_len - s >= min_anchor and before[min(s, len(before) - 1)] >= MIN_DIFF
+                 and any(uniq(start0 + o - s) for o in anchors if o >= s))
+        junction += left or right
+        reference += left + right
+    return junction, reference

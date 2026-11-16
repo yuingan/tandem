@@ -1,12 +1,13 @@
 """Module 3: how common known duplications are in a population.
 
-Each junction in the metadata is measured the way the isolate scan measures
-the junctions it finds (junction_scan.py): reads crossing the junction
-against reads running straight through the same boundary of the reference,
-both counted by the same rule, each corrected for the read placements the
-scan could count at that spot. The ratio estimates f(n-1), the extra copies
-per cell. For a duplication that adds one copy it is the share of cells that
-carry it.
+Each junction in the metadata is measured with the scanner (junction_scan.py):
+reads crossing the junction against reads running straight through the
+unit's two ends in the reference, both counted by the same rule, each
+corrected for the read placements that can be counted at that spot. As the
+junction is known, a read anchored on one side counts once the bases it
+carries past the boundary show which way the sequence goes. The ratio
+estimates f(n-1), the extra copies per cell. For a duplication that adds one
+copy it is the share of cells that carry it.
 
 No read mapping is needed; the reads are placed with unique 20-mers.
 
@@ -128,7 +129,7 @@ def _save_results(results, output_dir):
     tsv_path = os.path.join(output_dir, "junction_quantification.tsv")
     with open(tsv_path, "w") as f:
         f.write("# dosage = junction reads / reference reads, each corrected for the read\n")
-        f.write("# placements the scan can count there: f(n-1), extra copies per cell.\n")
+        f.write("# placements that can be counted there: f(n-1), extra copies per cell.\n")
         f.write("# Where no read can be placed across the junction, dosage is from depth\n")
         f.write("# (dosage_from). dosage_low and dosage_high bound a 95% interval.\n")
         f.write("\t".join(COLUMNS) + "\n")
@@ -141,7 +142,7 @@ def _save_results(results, output_dir):
         json.dump({
             "unit": "dosage",
             "unit_description": (
-                "Junction reads over reference reads at the same boundary, each "
+                "Junction reads over reference reads at the unit's two ends, each "
                 "corrected for the read placements that can be counted there. "
                 "Estimates f(n-1), the extra copies per cell; for a duplication "
                 "adding one copy, the share of cells that carry it. Where no read "

@@ -73,8 +73,10 @@ Examples:
     )
     parser.add_argument(
         "--min-anchor", type=int, default=25,
-        help="Bases required either side of a junction (default: 25). Applied "
-             "to the ancestral allele too, so both are counted the same way."
+        help="Bases required either side of a junction to find it, and on the "
+             "anchored side to count a read at a known one (default: 25). "
+             "Applied to the ancestral allele too, so both are counted the "
+             "same way."
     )
     parser.add_argument(
         "--control-junctions", metavar="TSV",
