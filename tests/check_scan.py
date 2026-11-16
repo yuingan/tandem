@@ -5,9 +5,10 @@
 Covers the cases real data throws at the scanner: reads running across the
 origin of a circular chromosome, a duplication on a second contig, a small
 indel that should stay below the size floor, a repeat right beside the
-junction, long microhomology at the junction, background marked from a
-control sample, boundaries given only roughly, a junction with a repeat at
-one end, and one no read can cross.
+junction, long microhomology at the junction, near-identical repeat copies
+with sequencing errors, background marked from a control sample, boundaries
+given only roughly, a junction with a repeat at one end, and one no read can
+cross.
 Prints PASS/FAIL per case and exits non-zero if anything failed.
 """
 
@@ -29,11 +30,11 @@ def write_fasta(path, records):
                 f.write(seq[i:i + 70] + "\n")
 
 
-def simulate(ref, prefix, start, end, freq, seed, depth=100):
+def simulate(ref, prefix, start, end, freq, seed, depth=100, error=0.001):
     subprocess.run(
         [sys.executable, SIMULATE, ref, prefix, "--start", str(start),
          "--end", str(end), "--frequency", str(freq), "--depth", str(depth),
-         "--circular", "--seed", str(seed)],
+         "--error", str(error), "--circular", "--seed", str(seed)],
         check=True, capture_output=True)
     return prefix + "_R1.fq", prefix + "_R2.fq"
 
@@ -158,6 +159,28 @@ def main(work):
               f"dosage {rows[0]['dosage']} (truth 0.5)") if rows else "not found"
     results.append(("12 bp microhomology at the junction", ok, detail))
 
+    # 4c. Four copies of a 4 kb element, each 10 bases off the others, and no
+    #     duplication. With sequencing errors at 0.5% a read from one copy now
+    #     and then picks up an anchor on another; none of that may come out as
+    #     a junction, even at one read.
+    random.seed(23)
+    base = [random.choice("ACGT") for _ in range(500_000)]
+    element = [random.choice("ACGT") for _ in range(4000)]
+    for pos in (60_000, 170_000, 280_000, 390_000):
+        copy = list(element)
+        for i in random.sample(range(4000), 10):
+            copy[i] = random.choice([b for b in "ACGT" if b != copy[i]])
+        base[pos:pos + 4000] = copy
+    copies_fa = os.path.join(work, "near_identical_copies.fna")
+    write_fasta(copies_fa, [("chrom", "".join(base))])
+    r1, r2 = simulate(copies_fa, os.path.join(work, "copies"), 1, 2, 0.0, 24,
+                      depth=150, error=0.005)
+    rows = run_scan(copies_fa, r1, r2, os.path.join(work, "out_copies"),
+                    extra=["--min-support", "1"])
+    detail = ", ".join(f"{r['start']}-{r['end']} ({r['junction_reads']})" for r in rows[:3])
+    results.append(("near-identical copies, errors: no junction", not rows,
+                    detail or "0 junction(s)"))
+
     # 5. A junction that is also in the control is marked with its support there.
     c1, c2 = simulate(chrom_fa, os.path.join(work, "ctrl"), 50000, 60000, 0.2, 16)
     ctrl_rows = run_scan(chrom_fa, c1, c2, os.path.join(work, "out_ctrl"),
@@ -232,7 +255,7 @@ def main(work):
     h1, h2 = simulate(one_fa, os.path.join(work, "one_side"), 100001, 110000, 0.5, 17)
     metadata = os.path.join(work, "one_side.tsv")
     with open(metadata, "w") as f:
-        f.write("one_side\t100001\t110000\n")
+        f.write("one_side\t100001\t110000\nstart_10_out\t100011\t110000\n")
     rows = run_population(one_fa, h1, h2, metadata, os.path.join(work, "out_one_side"))
     found = [r for r in run_scan(one_fa, h1, h2, os.path.join(work, "out_one_side_scan"))
              if near(r, "chrom", 100001, 110000)]
@@ -242,6 +265,16 @@ def main(work):
     detail = (f"scan found {len(found)}; known: {r['junction_reads']} reads, dosage "
               f"{r['dosage']} from {r['dosage_from']} (truth 0.5)") if r else "no row"
     results.append(("repeat at one end: counted from the other", ok, detail))
+
+    # With no read placed on both sides there is no vote to correct a start
+    # given 10 bp out; the reads placed on the unit's end still find it.
+    off = rows[1] if len(rows) > 1 else None
+    ok = (r is not None and off is not None
+          and (off["dup_start"], off["dup_end"], off["dosage"])
+          == (r["dup_start"], r["dup_end"], r["dosage"]))
+    detail = (f"{off['dup_start']}-{off['dup_end']}, dosage {off['dosage']}"
+              if off is not None else "no row")
+    results.append(("repeat at one end, start 10 bp out", ok, detail))
 
     # 8b. Both ends of the unit also occur elsewhere: no read across the
     #     junction can be placed from either side, so the dosage comes from

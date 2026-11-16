@@ -196,8 +196,9 @@ def scan(ref_seq, read_paths, k=ANCHOR_K, stride=STRIDE,
 
     targets: (start, end) of known duplicated units. Instead of the junctions
     found, each target is measured, in order, whatever its support: at the
-    best-supported junction within slop bases of both ends, or where it is
-    if no read crosses it. Reads are counted there by the rule for known
+    best-supported junction within slop bases of both ends; failing that,
+    where reads placed on one side put it (_from_one_side); failing that,
+    where it is given. Reads are counted there by the rule for known
     junctions (_count_known).
     """
     if index is None:
@@ -304,7 +305,8 @@ def scan(ref_seq, read_paths, k=ANCHOR_K, stride=STRIDE,
                                            end0 + 1, min_anchor, k)
         mh = _homology(start0, end0, ref_seq)
         uniq = uniqueness(start0, end0)
-        can_j = _countable(uniq, end0, start0, read_len, min_anchor, k, stride, mh)
+        can_j = _countable(uniq, end0, start0, read_len, min_anchor, k, stride, mh,
+                           _ways_out(ref_seq, start0, end0, mh))
         can_r = _countable(uniq, end0, end0 + 1, read_len, min_anchor, k, stride)
         most = read_len - 2 * min_anchor + 1     # placements with no repeats around
         return estimate(start0, end0, mh, support, ref_count, can_j, can_r, most, most)
@@ -317,7 +319,7 @@ def scan(ref_seq, read_paths, k=ANCHOR_K, stride=STRIDE,
 
         def measure_known(start0, end0):
             mh = _homology(start0, end0, ref_seq)
-            ways = _ways_out(ref_seq, start0, end0)
+            ways = _ways_out(ref_seq, start0, end0, mh)
             support, at_end, at_start = _count_known(reads, groups, start0, end0,
                                                      ways, min_anchor, k, mh)
             can_j, can_r = _placements(uniqueness(start0, end0), start0, end0, ways,
@@ -332,6 +334,11 @@ def scan(ref_seq, read_paths, k=ANCHOR_K, stride=STRIDE,
                     if abs(s - start0) <= slop and abs(e - end0) <= slop]
             if near:
                 _, _, start0, end0 = max(near)
+            else:
+                # no read crosses it with both sides placed; reads placed on
+                # one side can still say where it is
+                start0, end0 = (_from_one_side(reads, groups, start0, end0, slop, ref_seq, k)
+                                or (start0, end0))
             measured.append(measure_known(start0, end0))
         return measured
 
@@ -444,7 +451,25 @@ def _vote(votes, read, ref_seq, diags, in_read, k, min_anchor, min_size):
         return
     if end0 - start0 + 1 < min_size:
         return
+    # The bases either side must say junction, not reference. Between two
+    # near-identical copies of a repeat one sequencing error can put a read on
+    # the other copy's diagonal, but it cannot supply the bases that tell the
+    # copies apart.
+    if not _told(read, s, ref_seq, start0, end0):
+        return
     votes[(start0, end0)] = votes.get((start0, end0), 0) + 1
+
+
+def _told(read, s, ref_seq, start0, end0):
+    """Whether a read with a junction at offset s (left-aligned) follows the
+    junction rather than the reference on both sides of it (_follows)."""
+    after_ref, after_junction, before_ref, before_junction = _ways_out(
+        ref_seq, start0, end0, _homology(start0, end0, ref_seq))
+    w = min(len(read) - s, len(after_ref))
+    v = min(s, len(before_ref))
+    return (_follows(read[s:s + w], after_junction[:w], after_ref[:w]) == "junction"
+            and _follows(read[s - v:s], before_junction[len(before_junction) - v:],
+                         before_ref[len(before_ref) - v:]) == "junction")
 
 
 def left_align(start0, end0, ref):
@@ -575,7 +600,8 @@ def _uniqueness(ref_seq, index, k, windows):
     return uniq
 
 
-def _countable(uniq, left_end, right_start, read_len, min_anchor, k, stride, mh=0):
+def _countable(uniq, left_end, right_start, read_len, min_anchor, k, stride, mh=0,
+               ways=None):
     """Read placements across a boundary the scan would count.
 
     The read takes s bases ending at left_end, then the rest from right_start
@@ -586,9 +612,19 @@ def _countable(uniq, left_end, right_start, read_len, min_anchor, k, stride, mh=
     At a junction with mh bases of microhomology, s is measured at the
     left-aligned position, and the first mh bases after it read the same on
     both sides, so an anchor ending inside them still places the left side.
+    A junction read must also carry MIN_DIFF telling bases on each side
+    (_told); ways, from _ways_out, says where they are.
     """
+    if ways is not None:
+        after_ref, after_junction, before_ref, before_junction = ways
+        after = np.cumsum([0] + [a != b for a, b in zip(after_ref, after_junction)])
+        before = np.cumsum([0] + [a != b for a, b in
+                                  zip(reversed(before_ref), reversed(before_junction))])
     total = 0
     for s in range(min_anchor, read_len - min_anchor + 1):
+        if ways is not None and (after[min(read_len - s, len(after) - 1)] < MIN_DIFF
+                                 or before[min(s, len(before) - 1)] < MIN_DIFF):
+            continue
         left = right = False
         for o in range(0, read_len - k + 1, stride):
             if o + k <= s + mh:
@@ -663,15 +699,16 @@ def _kept_arrays(kept):
     return reads, tuple(arr[:, j] for j in range(5))
 
 
-def _ways_out(ref_seq, start0, end0, w=SPLIT_WINDOW):
+def _ways_out(ref_seq, start0, end0, mh=0, w=SPLIT_WINDOW):
     """The two ways the sequence can run past each end of a known unit.
 
-    after_ref and after_junction: up to w bases on from the unit's last base,
-    into the reference or across the junction into the unit's first bases.
-    before_ref and before_junction: up to w bases leading up to the unit's
-    first base, from the reference or from the unit's end.
+    after_ref and after_junction: up to mh + w bases on from the unit's last
+    base, into the reference or across the junction into the unit's first
+    bases. The first mh read the same either way, so w more are taken after
+    them. before_ref and before_junction: up to w bases leading up to the
+    unit's first base, from the reference or from the unit's end.
     """
-    after_ref = ref_seq[end0 + 1:end0 + 1 + w]
+    after_ref = ref_seq[end0 + 1:end0 + 1 + mh + w]
     after_junction = (ref_seq[start0:end0 + 1] + after_ref)[:len(after_ref)]
     before_ref = ref_seq[max(0, start0 - w):start0]
     before_junction = ref_seq[end0 + 1 - len(before_ref):end0 + 1]
@@ -740,6 +777,98 @@ def _count_known(reads, groups, start0, end0, ways, min_anchor, k, mh):
             at_start += 1
 
     return len(junction), at_end, at_start
+
+
+SEED = 12            # bases looked up to find where a read's far side lands
+DEPARTS = 2          # mismatches among the next 5 bases that confirm a departure
+
+
+def _departure(read, d, x, step, ref_seq):
+    """First offset at or beyond x (going by step) where the read leaves its
+    diagonal d for good, or None. A base that differs while the next ones
+    match again is a sequencing error, not a departure."""
+    n = len(ref_seq)
+    while 0 <= x < len(read):
+        p = x + d
+        if p < 0 or p >= n:
+            return None
+        if read[x] != ref_seq[p]:
+            ahead = [x + step * i for i in range(1, 6)]
+            off = sum(1 for y in ahead if 0 <= y < len(read) and 0 <= y + d < n
+                      and read[y] != ref_seq[y + d])
+            if off >= DEPARTS:
+                return x
+        x += step
+    return None
+
+
+def _finds(text, pattern):
+    """Every place pattern occurs in text."""
+    at = text.find(pattern)
+    while at >= 0:
+        yield at
+        at = text.find(pattern, at + 1)
+
+
+def _from_one_side(reads, groups, start0, end0, slop, ref_seq, k):
+    """Where reads anchored on one side put a known junction that no read
+    places from both sides; None unless two or more agree.
+
+    A read anchored before the unit's end follows the reference up to the
+    junction and then the unit's start. Where it leaves the reference, its
+    next bases are looked up near the given start, which gives its far side
+    as a diagonal; the junction is then placed between the two diagonals as
+    for any junction read (_exact_junction), left-aligned, and must pass the
+    same test (_told). A read anchored after the unit's start is followed
+    back the same way. Only junctions within slop of the given one count.
+    """
+    which, diag, first, last, length = groups
+    votes = {}
+
+    def vote(read, split, left, right):
+        s, e, shift = left_align(split + right, split + left - 1, ref_seq)
+        if (s < e and abs(s - start0) <= slop and abs(e - end0) <= slop
+                and _told(read, split - shift, ref_seq, s, e)):
+            votes[(s, e)] = votes.get((s, e), 0) + 1
+
+    # anchored before the end; past the junction the read runs on into the
+    # unit's start, microhomology first, so look a little beyond the given start
+    lo = max(0, start0 - slop)
+    window = ref_seq[lo:start0 + slop + SPLIT_WINDOW + SEED]
+    across = (diag + 1 <= end0 + 1 + slop) & (diag + length - 1 >= end0 + 1 - slop)
+    for i in np.nonzero(across)[0]:
+        read, d = reads[which[i]], int(diag[i])
+        x = _departure(read, d, int(last[i]) + k, 1, ref_seq)
+        if x is None or len(read) - x < SEED:
+            continue
+        for at in _finds(window, read[x:x + SEED]):
+            right = lo + at - x
+            split = _exact_junction(read, ref_seq, d, right,
+                                    x - SPLIT_WINDOW, x + SPLIT_WINDOW)
+            if split is not None:
+                vote(read, split, d, right)
+
+    # anchored after the start; back past the junction the read runs into the
+    # unit's end
+    lo = max(0, end0 + 1 - slop - SEED)
+    window = ref_seq[lo:end0 + 1 + slop]
+    across = (diag + 1 <= start0 + slop) & (diag + length - 1 >= start0 - slop)
+    for i in np.nonzero(across)[0]:
+        read, d = reads[which[i]], int(diag[i])
+        x = _departure(read, d, int(first[i]) - 1, -1, ref_seq)
+        if x is None or x + 1 < SEED:
+            continue
+        for at in _finds(window, read[x + 1 - SEED:x + 1]):
+            left = lo + at - (x + 1 - SEED)
+            split = _exact_junction(read, ref_seq, left, d,
+                                    x + 1 - SPLIT_WINDOW, x + 1 + SPLIT_WINDOW)
+            if split is not None:
+                vote(read, split, left, d)
+
+    if not votes:
+        return None
+    (s, e), n = max(votes.items(), key=lambda kv: kv[1])
+    return (s, e) if n >= 2 else None
 
 
 def _placements(uniq, start0, end0, ways, read_len, min_anchor, k, stride, mh):
