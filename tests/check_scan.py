@@ -5,8 +5,9 @@
 Covers the cases real data throws at the scanner: reads running across the
 origin of a circular chromosome, a duplication on a second contig, a small
 indel that should stay below the size floor, a repeat right beside the
-junction, long microhomology at the junction, near-identical repeat copies
-with sequencing errors, background marked from a control sample, boundaries
+junction, long microhomology at the junction, near-identical and diverged
+repeat copies with sequencing errors, a crossover inside a diverged repeat,
+background marked from a control sample, boundaries
 given only roughly, a junction with a repeat at one end, and one no read can
 cross.
 Prints PASS/FAIL per case and exits non-zero if anything failed.
@@ -30,11 +31,13 @@ def write_fasta(path, records):
                 f.write(seq[i:i + 70] + "\n")
 
 
-def simulate(ref, prefix, start, end, freq, seed, depth=100, error=0.001):
+def simulate(ref, prefix, start, end, freq, seed, depth=100, error=0.001,
+             read_length=150, insert=350):
     subprocess.run(
         [sys.executable, SIMULATE, ref, prefix, "--start", str(start),
          "--end", str(end), "--frequency", str(freq), "--depth", str(depth),
-         "--error", str(error), "--circular", "--seed", str(seed)],
+         "--error", str(error), "--read-length", str(read_length),
+         "--insert", str(insert), "--circular", "--seed", str(seed)],
         check=True, capture_output=True)
     return prefix + "_R1.fq", prefix + "_R2.fq"
 
@@ -179,6 +182,58 @@ def main(work):
                     extra=["--min-support", "1"])
     detail = ", ".join(f"{r['start']}-{r['end']} ({r['junction_reads']})" for r in rows[:3])
     results.append(("near-identical copies, errors: no junction", not rows,
+                    detail or "0 junction(s)"))
+
+    # 4d. A crossover inside a 1.7 kb repeat whose two copies differ at about
+    #     1 base in 22, as in SBW25 isolates M2 and M5: the copies run alike for
+    #     longer than 30 bp around the crossover, and the bases that tell them
+    #     apart lie further out in the read. Isolate, 251 bp reads.
+    random.seed(29)
+    base = [random.choice("ACGT") for _ in range(250_000)]
+    element = [random.choice("ACGT") for _ in range(1700)]
+    other = list(element)
+    for i in range(1700):
+        if not 820 <= i < 870 and random.random() < 0.045:
+            other[i] = random.choice([b for b in "ACGT" if b != other[i]])
+    base[40_000:41_700] = element
+    base[140_000:141_700] = other
+    cross_fa = os.path.join(work, "repeat_crossover.fna")
+    write_fasta(cross_fa, [("chrom", "".join(base))])
+    r1, r2 = simulate(cross_fa, os.path.join(work, "crossover"), 40_851, 140_850, 1.0, 30,
+                      depth=50, error=0.002, read_length=251, insert=450)
+    rows = [r for r in run_scan(cross_fa, r1, r2, os.path.join(work, "out_crossover"))
+            if near(r, "chrom", 40_851, 140_850, slop=60)]
+    known = run_scan(cross_fa, r1, r2, os.path.join(work, "out_crossover_known"),
+                     extra=["-s", "40851", "-e", "140850"])
+    ok = (len(rows) == 1 and int(rows[0]["junction_reads"]) >= 5 and len(known) == 1
+          and float(known[0]["dosage_low"]) <= 1 <= float(known[0]["dosage_high"]))
+    detail = (f"scan {rows[0]['junction_reads']} reads at {rows[0]['start']}-{rows[0]['end']}"
+              if rows else "scan found nothing")
+    if known:
+        detail += (f"; known {known[0]['junction_reads']}/{known[0]['reference_reads']}, "
+                   f"dosage {known[0]['dosage']} ({known[0]['dosage_low']}-"
+                   f"{known[0]['dosage_high']}, truth 1)")
+    results.append(("crossover inside a diverged repeat", ok, detail))
+
+    # 4e. Four copies of a 2 kb element at about 95% identity to each other,
+    #     no duplication, sequencing errors at 0.5%: telling bases further out
+    #     in the read must not let an error through either.
+    random.seed(31)
+    base = [random.choice("ACGT") for _ in range(400_000)]
+    element = [random.choice("ACGT") for _ in range(2000)]
+    for pos in (50_000, 150_000, 250_000, 350_000):
+        copy = list(element)
+        for i in random.sample(range(2000), 50):
+            copy[i] = random.choice([b for b in "ACGT" if b != copy[i]])
+        base[pos:pos + 2000] = copy
+    diverged_fa = os.path.join(work, "diverged_copies.fna")
+    write_fasta(diverged_fa, [("chrom", "".join(base))])
+    r1, r2 = simulate(diverged_fa, os.path.join(work, "diverged"), 1, 2, 0.0, 32,
+                      depth=150, error=0.005)
+    rows = run_scan(diverged_fa, r1, r2, os.path.join(work, "out_diverged"),
+                    extra=["--min-support", "1"])
+    detail = ", ".join(f"{r['start']}-{r['end']} ({r['junction_reads']})" for r in rows[:3])
+    results.append(("diverged copies, errors: no junction", not rows,
                     detail or "0 junction(s)"))
 
     # 5. A junction that is also in the control is marked with its support there.

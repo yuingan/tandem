@@ -57,7 +57,7 @@ STRIDE = 8           # spacing between anchors along a read
 MIN_ANCHOR = 25      # bases required either side of a junction
 MIN_SUPPORT = 2      # reads needed before a junction is reported
 MIN_SIZE = 200       # smaller "duplications" are mostly indels; same floor as module 1
-MIN_DIFF = 3         # bases past a known boundary that must side with one way out
+MIN_DIFF = 3         # telling bases past a boundary that decide which way a read goes
 ORIGIN_SLOP = 1000   # see _vote
 CHUNK_READS = 100_000
 
@@ -306,20 +306,21 @@ def scan(ref_seq, read_paths, k=ANCHOR_K, stride=STRIDE,
         mh = _homology(start0, end0, ref_seq)
         uniq = uniqueness(start0, end0)
         can_j = _countable(uniq, end0, start0, read_len, min_anchor, k, stride, mh,
-                           _ways_out(ref_seq, start0, end0, mh))
+                           _ways_out(ref_seq, start0, end0, mh, read_len))
         can_r = _countable(uniq, end0, end0 + 1, read_len, min_anchor, k, stride)
         most = read_len - 2 * min_anchor + 1     # placements with no repeats around
         return estimate(start0, end0, mh, support, ref_count, can_j, can_r, most, most)
 
     if targets is not None:
         reads, groups = _kept_arrays(kept)
+        longest = max((len(r) for r in reads), default=read_len)
         # every k-mer unique, every base past each end telling the ways out apart
-        apart = ("A" * SPLIT_WINDOW, "C" * SPLIT_WINDOW) * 2
+        apart = ("A" * read_len, "C" * read_len) * 2
         most = _placements(lambda p: True, 0, 0, apart, read_len, min_anchor, k, stride, 0)
 
         def measure_known(start0, end0):
             mh = _homology(start0, end0, ref_seq)
-            ways = _ways_out(ref_seq, start0, end0, mh)
+            ways = _ways_out(ref_seq, start0, end0, mh, max(longest, read_len))
             support, at_end, at_start = _count_known(reads, groups, start0, end0,
                                                      ways, min_anchor, k, mh)
             can_j, can_r = _placements(uniqueness(start0, end0), start0, end0, ways,
@@ -462,14 +463,20 @@ def _vote(votes, read, ref_seq, diags, in_read, k, min_anchor, min_size):
 
 def _told(read, s, ref_seq, start0, end0):
     """Whether a read with a junction at offset s (left-aligned) follows the
-    junction rather than the reference on both sides of it (_follows)."""
+    junction rather than the reference on both sides of it (_follows).
+
+    Each side is read out to the end of the read: inside a diverged repeat
+    the copies can run alike for longer than any fixed window, and the bases
+    that tell them apart are further out.
+    """
     after_ref, after_junction, before_ref, before_junction = _ways_out(
-        ref_seq, start0, end0, _homology(start0, end0, ref_seq))
+        ref_seq, start0, end0, _homology(start0, end0, ref_seq), len(read))
     w = min(len(read) - s, len(after_ref))
     v = min(s, len(before_ref))
     return (_follows(read[s:s + w], after_junction[:w], after_ref[:w]) == "junction"
-            and _follows(read[s - v:s], before_junction[len(before_junction) - v:],
-                         before_ref[len(before_ref) - v:]) == "junction")
+            and _follows(read[s - v:s][::-1],
+                         before_junction[len(before_junction) - v:][::-1],
+                         before_ref[len(before_ref) - v:][::-1]) == "junction")
 
 
 def left_align(start0, end0, ref):
@@ -613,7 +620,7 @@ def _countable(uniq, left_end, right_start, read_len, min_anchor, k, stride, mh=
     left-aligned position, and the first mh bases after it read the same on
     both sides, so an anchor ending inside them still places the left side.
     A junction read must also carry MIN_DIFF telling bases on each side
-    (_told); ways, from _ways_out, says where they are.
+    (_told); ways, from _ways_out over a read's length, says where they are.
     """
     if ways is not None:
         after_ref, after_junction, before_ref, before_junction = ways
@@ -706,7 +713,8 @@ def _ways_out(ref_seq, start0, end0, mh=0, w=SPLIT_WINDOW):
     base, into the reference or across the junction into the unit's first
     bases. The first mh read the same either way, so w more are taken after
     them. before_ref and before_junction: up to w bases leading up to the
-    unit's first base, from the reference or from the unit's end.
+    unit's first base, from the reference or from the unit's end. Callers
+    that call reads by these pass a read's length as w.
     """
     after_ref = ref_seq[end0 + 1:end0 + 1 + mh + w]
     after_junction = (ref_seq[start0:end0 + 1] + after_ref)[:len(after_ref)]
@@ -719,20 +727,32 @@ def _follows(read, junction, reference):
     """Which way out the read's bases follow, if they can tell: "junction",
     "reference" or None.
 
-    Only positions where the two ways differ decide. At least MIN_DIFF must
-    side with one and none with the other, and the read may differ from the
-    one it follows at no more bases than a junction read may (_exact_junction).
+    The sequences run outward from the boundary (reversed for the side
+    before it). Only positions where the two ways differ decide, and the
+    first MIN_DIFF of them the read carries must all side with the same way.
+    A base that matches neither way is a sequencing error; the read may have
+    no more of those, up to that point, than a junction read may
+    (_exact_junction). A read that ends before MIN_DIFF telling bases cannot
+    tell.
     """
-    for_j = for_r = off_j = off_r = 0
+    for_j = for_r = off = 0
     for x, a, b in zip(read, junction, reference):
-        off_j += x != a
-        off_r += x != b
-        if a != b:
-            for_j += x == a
-            for_r += x == b
-    if for_j >= MIN_DIFF and not for_r and off_j <= MAX_SPLIT_MISMATCH:
+        if a == b:
+            off += x != a
+            continue
+        if x == a:
+            for_j += 1
+        elif x == b:
+            for_r += 1
+        else:
+            off += 1
+        if for_j + for_r == MIN_DIFF:
+            break
+    if off > MAX_SPLIT_MISMATCH:
+        return None
+    if for_j == MIN_DIFF:
         return "junction"
-    if for_r >= MIN_DIFF and not for_j and off_r <= MAX_SPLIT_MISMATCH:
+    if for_r == MIN_DIFF:
         return "reference"
     return None
 
@@ -743,10 +763,10 @@ def _count_known(reads, groups, start0, end0, ways, min_anchor, k, mh):
     A read anchored before the unit's end, with min_anchor bases there, is
     called by the bases it carries past the end; a read anchored after the
     unit's start, with min_anchor bases there, by the bases it carries
-    before the start. A junction read anchored on both sides is counted
-    once. At a junction with microhomology the boundary is the left-aligned
-    one, and an anchor may run into the mh bases after it, which read the
-    same either way.
+    before the start (_follows, with ways taken over a read's length). A
+    junction read anchored on both sides is counted once. At a junction
+    with microhomology the boundary is the left-aligned one, and an anchor
+    may run into the mh bases after it, which read the same either way.
 
     Returns the junction reads and the reference reads at the unit's end and
     at its start.
@@ -769,8 +789,8 @@ def _count_known(reads, groups, start0, end0, ways, min_anchor, k, mh):
     for i in np.nonzero((s > 0) & (length - s >= min_anchor) & (last >= s))[0]:
         read, b = reads[which[i]], int(s[i])
         w = min(b, len(before_ref))
-        call = _follows(read[b - w:b], before_junction[len(before_junction) - w:],
-                        before_ref[len(before_ref) - w:])
+        call = _follows(read[b - w:b][::-1], before_junction[len(before_junction) - w:][::-1],
+                        before_ref[len(before_ref) - w:][::-1])
         if call == "junction":
             junction.add(int(which[i]))
         elif call == "reference":
@@ -881,7 +901,8 @@ def _placements(uniq, start0, end0, ways, read_len, min_anchor, k, stride, mh):
     the two ends add up, while each junction placement counts once.
     """
     after_ref, after_junction, before_ref, before_junction = ways
-    # telling bases within the first n past the end, or the last n before the start
+    # telling bases within the first n past the end, or the last n before the
+    # start; a read needs MIN_DIFF of them on the side it is called by
     after = np.cumsum([0] + [a != b for a, b in zip(after_ref, after_junction)])
     before = np.cumsum([0] + [a != b for a, b in
                               zip(reversed(before_ref), reversed(before_junction))])
