@@ -85,6 +85,13 @@ Examples:
              "also found there are marked with their control support."
     )
     parser.add_argument(
+        "--reference-tandems", metavar="PATH",
+        help="Module 1's output for the same reference: its directory, or its "
+             "tandem_duplications.tsv. Junctions that add or remove whole copies "
+             "of one of the reference's tandem duplications or arrays are marked "
+             "with it."
+    )
+    parser.add_argument(
         "--min-support", type=int, default=2,
         help="Reads crossing a junction before it is reported (default: 2)"
     )
@@ -381,6 +388,13 @@ def _validate_args(args, parser):
         parser.error(f"Reverse reads not found: {args.read2}")
     if args.control_junctions and not os.path.isfile(args.control_junctions):
         parser.error(f"Control junctions not found: {args.control_junctions}")
+    if args.reference_tandems:
+        path = args.reference_tandems
+        found = os.path.isfile(path) or (
+            os.path.isdir(path) and os.path.isfile(os.path.join(path, "tandem_duplications.tsv")))
+        if not found:
+            parser.error(f"No Module 1 output at {path} (expected a directory with "
+                         f"tandem_duplications.tsv, or the file itself)")
 
     if args.metadata and not os.path.isfile(args.metadata):
         parser.error(f"Metadata file not found: {args.metadata}")
@@ -514,6 +528,7 @@ def _run(argv=None):
                 starts=[s + 1 for s in args.start] if args.start else None,
                 ends=args.end,
                 slop=search_range,
+                reference_tandems=args.reference_tandems,
             )
             module_name = "module2"
         else:

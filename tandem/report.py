@@ -317,6 +317,7 @@ def _build_module2_table(results):
 
     given = "provided_start" in results[0]
     control = "control_reads" in results[0]
+    tandem = "reference_tandem" in results[0]
     rows = []
     for i, r in enumerate(results):
         cells = [
@@ -339,6 +340,8 @@ def _build_module2_table(results):
         ]
         if control:
             cells.append(f"<td>{r.get('control_reads', 0)}</td>")
+        if tandem:
+            cells.append(f"<td>{r.get('reference_tandem') or '–'}</td>")
         cells_html = "".join(cells)
         rows.append(f"""
         <tr class="clickable-row" data-target="detail-{i}">
@@ -348,7 +351,8 @@ def _build_module2_table(results):
     headers = ["#", "Sequence"] + (["Given"] if given else []) + [
         "Start", "End", "Size", "Microhomology", "Junction Reads",
         "Reference Reads", "Dosage", "95% Interval", "From", "Depth Estimate",
-    ] + (["Control Reads"] if control else [])
+    ] + (["Control Reads"] if control else []) + (
+        ["Copy Number Change Of"] if tandem else [])
     header_html = "".join("<th>" + h + "</th>" for h in headers)
 
     return f"""
@@ -390,6 +394,9 @@ def _build_module2_details(results):
             items.insert(1, _item("Given", f"{r['provided_start']:,} - {r['provided_end']:,}"))
         if "control_reads" in r:
             items.append(_item("Reads in the control", r["control_reads"]))
+        if r.get("reference_tandem"):
+            items.append(_item("Changes the copy number of the reference's",
+                               r["reference_tandem"]))
         items_html = "".join(items)
         junction = _junction_display(r.get("junction_sequence"), r.get("microhomology", 0))
 

@@ -236,6 +236,44 @@ def main(work):
     results.append(("diverged copies, errors: no junction", not rows,
                     detail or "0 junction(s)"))
 
+    # 4f. An array of five 220 bp units, about 94% alike, gains three units.
+    #     Given Module 1's table of the reference's tandem duplications, the
+    #     scan marks the junction as a change in the array's copy number. The
+    #     10 kb duplication of test 1 lies in no array and stays unmarked.
+    random.seed(37)
+    base = [random.choice("ACGT") for _ in range(200_000)]
+    master = [random.choice("ACGT") for _ in range(220)]
+    for u in range(5):
+        unit = list(master)
+        for i in random.sample(range(220), 7):
+            unit[i] = random.choice([b for b in "ACGT" if b != unit[i]])
+        base[100_000 + 220 * u:100_000 + 220 * (u + 1)] = unit
+    array_fa = os.path.join(work, "array.fna")
+    write_fasta(array_fa, [("chrom", "".join(base))])
+    module1 = os.path.join(work, "module1_array")
+    os.makedirs(module1, exist_ok=True)
+    with open(os.path.join(module1, "tandem_duplications.tsv"), "w") as f:
+        f.write("seq_id\tcopy1_start\tcopy1_end\tcopy2_start\tcopy2_end\tsize\t"
+                "copy_number\torientation\tarchitecture\n")
+        f.write("chrom\t100001\t100220\t100221\t100440\t220\t5\tdirect\tarray\n")
+        f.write("chrom\t150001\t150500\t150501\t151000\t500\t2\tdirect\tmicrohomology\n")
+    r1, r2 = simulate(array_fa, os.path.join(work, "array"), 100_001, 100_660, 1.0, 38,
+                      depth=60)
+    hit = [r for r in run_scan(array_fa, r1, r2, os.path.join(work, "out_array"),
+                               extra=["--reference-tandems", module1])
+           if near(r, "chrom", 100_001, 100_660, slop=60)]
+    plain = run_scan(chrom_fa, os.path.join(work, "circ_R1.fq"),
+                     os.path.join(work, "circ_R2.fq"), os.path.join(work, "out_circ_tandems"),
+                     extra=["--reference-tandems",
+                            os.path.join(module1, "tandem_duplications.tsv")])
+    ok = (len(hit) == 1 and hit[0]["reference_tandem"].startswith("array 100001-101100")
+          and len(plain) == 1 and not plain[0]["reference_tandem"])
+    detail = (f"{hit[0]['start']}-{hit[0]['end']}: {hit[0]['reference_tandem'] or 'not marked'}"
+              if hit else "array junction not found")
+    detail += "; 10 kb duplication " + (
+        "unmarked" if plain and not plain[0]["reference_tandem"] else "marked")
+    results.append(("array copy-number change is marked", ok, detail))
+
     # 5. A junction that is also in the control is marked with its support there.
     c1, c2 = simulate(chrom_fa, os.path.join(work, "ctrl"), 50000, 60000, 0.2, 16)
     ctrl_rows = run_scan(chrom_fa, c1, c2, os.path.join(work, "out_ctrl"),

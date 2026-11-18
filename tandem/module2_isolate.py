@@ -516,13 +516,19 @@ def _save_results(confirmed, output_dir):
 
 def run_scan(ref_fasta, read1, read2=None, output_dir=".",
              min_anchor=25, min_support=2, min_size=200, control=None,
-             threads=1, starts=None, ends=None, slop=400):
+             threads=1, starts=None, ends=None, slop=400, reference_tandems=None):
     """Find junctions in the reads, no coordinates needed.
 
     control: junctions.tsv from a scan of a sample without the duplications,
     such as the ancestor, best run with --min-support 1. Junctions found there
     too are background (repeats, library artefacts, differences from the
     reference), not events, and are marked with their control support.
+
+    reference_tandems: Module 1's output for the same reference (its directory
+    or tandem_duplications.tsv). A junction inside one of the reference's
+    tandem duplications or arrays, a whole number of its units long, changes
+    how many copies it has rather than duplicating new sequence, and is
+    marked with it.
 
     starts, ends: candidate boundaries (1-based), e.g. read off a coverage
     plot. Every start is paired with every end after it, and each pair is
@@ -592,6 +598,15 @@ def run_scan(ref_fasta, read1, read2=None, output_dir=".",
         n = sum(1 for r in results if r["control_reads"])
         logger.info(f"  {n} of {len(results)} junction(s) also found in the control")
 
+    if reference_tandems:
+        tandems = _read_reference_tandems(reference_tandems)
+        for r in results:
+            r["reference_tandem"] = _in_reference_tandem(r, tandems)
+        n = sum(1 for r in results if r["reference_tandem"])
+        logger.info(f"  {n} of {len(results)} junction(s) change the copy number of a "
+                    f"tandem duplication or array of the reference "
+                    f"({len(tandems)} read from Module 1)")
+
     columns = ["seq_id", "start", "end", "size", "microhomology",
                "junction_reads", "reference_reads", "dosage", "dosage_from",
                "dosage_low", "dosage_high", "dosage_raw", "junction_visible",
@@ -600,6 +615,8 @@ def run_scan(ref_fasta, read1, read2=None, output_dir=".",
         columns[1:1] = ["provided_start", "provided_end"]
     if control:
         columns.append("control_reads")
+    if reference_tandems:
+        columns.append("reference_tandem")
     path = os.path.join(output_dir, "junctions.tsv")
     with open(path, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=columns, delimiter="\t",
@@ -609,6 +626,8 @@ def run_scan(ref_fasta, read1, read2=None, output_dir=".",
 
     for r in results:
         note = f"  control={r['control_reads']}" if control else ""
+        if r.get("reference_tandem"):
+            note += f"  in the reference's {r['reference_tandem']}"
         given = ""
         if starts and (r["start"], r["end"]) != (r["provided_start"], r["provided_end"]):
             given = f" (given {r['provided_start']:,}-{r['provided_end']:,})"
@@ -640,3 +659,70 @@ def _read_control(path):
                              "end": int(r["end"]),
                              "junction_reads": int(r["junction_reads"])})
     return rows
+
+
+TANDEM_SLOP = 50    # bp; Module 1's boundaries and a left-aligned junction differ a little
+
+
+def _read_reference_tandems(path):
+    """The reference's tandem duplications and arrays from Module 1.
+
+    path: Module 1's output directory, where tandem_duplications.tsv and
+    short_unit_arrays.tsv are read, or one of those files. Each gives the
+    stretch its copies cover and its period, the distance from one copy's
+    start to the next. Inverted and dispersed pairs are left out: their
+    copies are not side by side.
+    """
+    import csv
+    names = ("tandem_duplications.tsv", "short_unit_arrays.tsv")
+    if os.path.isdir(path):
+        files = [os.path.join(path, n) for n in names if os.path.isfile(os.path.join(path, n))]
+    else:
+        files = [path]
+    tandems = []
+    for name in files:
+        with open(name) as f:
+            for r in csv.DictReader(f, delimiter="\t"):
+                if (r.get("orientation") or "direct") != "direct":
+                    continue
+                if r.get("architecture") == "dispersed_pair":
+                    continue
+                try:
+                    start, size = int(r["copy1_start"]), int(r["size"])
+                    period = int(r["copy2_start"]) - start
+                    gap = int(r["copy2_start"]) - int(r["copy1_end"]) - 1
+                    copies = float(r.get("copy_number") or 2)
+                except (KeyError, TypeError, ValueError):
+                    continue
+                if period <= 0 or gap > max(size, 100):
+                    continue
+                if copies > 2:
+                    end = start + int(round(period * copies)) - 1
+                else:
+                    end = int(r["copy2_end"])
+                tandems.append({"seq_id": r["seq_id"], "start": start, "end": end,
+                                "period": period, "copies": copies})
+    return tandems
+
+
+def _in_reference_tandem(junction, tandems):
+    """How a junction relates to the reference's tandem duplications and arrays:
+    a description of the one whose copy number it changes, or "".
+
+    It must lie inside the stretch the copies cover and be a whole number of
+    periods long, so that it adds or removes whole copies; a junction that
+    merely falls inside a long duplicated stretch is something else.
+    """
+    for t in tandems:
+        if t["seq_id"] != junction["seq_id"]:
+            continue
+        if (junction["start"] < t["start"] - TANDEM_SLOP
+                or junction["end"] > t["end"] + TANDEM_SLOP):
+            continue
+        units = round(junction["size"] / t["period"])
+        off = abs(junction["size"] - units * t["period"])
+        if units >= 1 and off <= max(TANDEM_SLOP, 0.15 * t["period"]):
+            kind = "array" if t["copies"] > 2 else "tandem duplication"
+            copies = f"{t['copies']:g}"
+            return f"{kind} {t['start']}-{t['end']} ({t['period']} bp x {copies})"
+    return ""
