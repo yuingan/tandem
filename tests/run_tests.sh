@@ -55,6 +55,11 @@ echo "-----------------------------"
 python "$here/check_microhomology.py" || status=1
 
 echo
+echo "Flanking repeat of a tandem pair"
+echo "--------------------------------"
+python "$here/check_flanking_repeat.py" "$work" "$data" || status=1
+
+echo
 echo "Module 2: junction scan on simulated reads"
 echo "-----------------------------------------"
 python "$here/check_scan.py" "$work/scan" || status=1

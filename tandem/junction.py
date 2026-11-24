@@ -312,6 +312,9 @@ def check_hr(genome_seq, c1s_0, c1e_0, c2s_0, c2e_0,
       of --hr-outward-ext. Without this cap, large outward_ext would
       extend deep into body, and since body₁ ≡ body₂ in a tandem, the
       aligner would match body-tail vs body-tail -> false positive HR.
+      For the same reason the tolerance stops where the other window of
+      the check begins: in a unit under 400 bp, 200 bp into the body
+      reaches the half of the unit that the other window covers.
 
       INNER boundaries (c2s_0 for check 1b, c1e_0 for check 2a): extend
       ONLY inward into the copy, zero extension across the inner junction.
@@ -334,8 +337,14 @@ def check_hr(genome_seq, c1s_0, c1e_0, c2s_0, c2e_0,
     inward = min(dup_length // 2, max_inward)
     seq_len = len(genome_seq)
 
-    # Cap into-body tolerance: prevents body₁≡body₂ false matches
-    body_tol = min(outward_ext, MAX_BODY_TOLERANCE)
+    # Cap into-body tolerance: prevents body₁≡body₂ false matches. It also
+    # stops short of the `inward` bases of the unit that the other window of a
+    # check covers. Up to 0.4.0.dev19 it did not: for a unit under 400 bp the two
+    # windows held the same stretch of the two copies, the copies were aligned
+    # with each other, and a pair with a unit under about 330 bp was given a
+    # flanking repeat of 200 - unit/2 bp whether or not it had one.
+    unit = min(dup_length, c2e_0 - c2s_0)
+    body_tol = min(outward_ext, MAX_BODY_TOLERANCE, max(0, unit - inward))
 
     def _window(left, right):
         """Extract genome subsequence [left, right), clamped to genome bounds."""

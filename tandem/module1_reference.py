@@ -47,7 +47,7 @@ logger = logging.getLogger("tandem")
 
 
 # Mechanism confidence thresholds (copy length in bp)
-CONFIDENCE_LOW_MAX = 300      # <300bp: flanking windows overlap copy itself
+CONFIDENCE_LOW_MAX = 300      # <300bp: windows of under 150 bp, too short to find or exclude a repeat
 CONFIDENCE_MODERATE_MAX = 500 # 300-500bp: moderate
 # >=500bp: high
 
