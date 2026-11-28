@@ -17,6 +17,12 @@ The unifying design choice is to report the **two sequence-level observations** 
 
 ## Installation
 
+### bioconda
+
+```bash
+conda create -n tandem -c conda-forge -c bioconda tandem-dup
+```
+
 ### From source
 
 ```bash
