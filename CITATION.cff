@@ -1,7 +1,7 @@
 cff-version: 1.2.0
 message: "If you use Tandem, please cite the preprint below."
 title: "Tandem"
-abstract: "A bioinformatics tool for detection, mechanism classification, and population quantification of bacterial tandem gene duplications."
+abstract: "A bioinformatics tool for detection, junction characterisation and population quantification of bacterial tandem duplications."
 type: software
 authors:
   - family-names: "Ngan"
@@ -11,7 +11,7 @@ authors:
     given-names: "Ewan St. John"
 repository-code: "https://github.com/yuingan/tandem"
 license: MIT
-version: "0.2.0"
+version: "0.4.0"
 preferred-citation:
   type: article
   title: "Tandem: a bioinformatics tool for detection, mechanism classification, and population quantification of bacterial tandem gene duplications"
