@@ -42,25 +42,6 @@ def run_module2(ref_fasta, read1, read2=None, output_dir=".",
       3. If no -s/-e: generate interactive coverage plot and exit.
          User examines the plot to identify candidate duplication
          boundaries, then re-runs with -s/-e.
-
-    Args:
-        ref_fasta: path to reference FASTA
-        read1: path to forward reads
-        read2: path to reverse reads (optional)
-        output_dir: output directory
-        threads: number of threads
-        window: sliding window size for coverage calculation
-        flank: flank size for junction candidate generation
-        junction_window: search window around each coordinate.
-            If 0 (--precise), search exact position only.
-            If None, defaults to `window`.
-        manual_start: list of candidate start positions (0-based internal)
-        manual_end: list of candidate end positions (0-based internal)
-        max_k: maximum junction extension length
-        hr_complexity_filter: reject HR calls from low-complexity windows
-
-    Returns:
-        list of confirmed junction dicts
     """
     logger.info("=" * 60)
     logger.info("Module 2: Isolate junction confirmation")
@@ -81,14 +62,14 @@ def run_module2(ref_fasta, read1, read2=None, output_dir=".",
     logger.info("Building k-mer index...")
     kmer_index = KmerIndex(sequences)
 
-    # Step 1: Map reads to reference and calculate coverage
-    logger.info("Step 1: Mapping reads to reference")
+    # Map reads to reference and calculate coverage
+    logger.info("Mapping reads to reference")
     bam_path = os.path.join(output_dir, "reads_to_ref.sorted.bam")
     alignment.map_reads_to_reference(
         ref_fasta, read1, read2, output_bam=bam_path, threads=threads
     )
 
-    logger.info("Step 2: Calculating coverage")
+    logger.info("Calculating coverage")
     all_coverage = {}
     all_medians = {}
     for seq_id in sequences:
@@ -174,8 +155,8 @@ def run_module2(ref_fasta, read1, read2=None, output_dir=".",
             genome_median=genome_median,
             elevated_regions=regions,
         )
-    # Step 3-5: Generate and confirm junction candidates
-    logger.info("Step 3: Generating junction candidates from boundary pairs")
+    # Generate and confirm junction candidates
+    logger.info("Generating junction candidates from boundary pairs")
     all_confirmed = []
 
     ref_seq = sequences[target_seq_id]
@@ -246,9 +227,6 @@ def _process_candidates(candidates, ref_seq, seq_id, kmer_index,
 
     grep gives accurate counts with no multi-mapping confusion because
     each junction is a unique sequence — a read either contains it or not.
-
-    Returns:
-        list of confirmed junction dicts
     """
     if not candidates:
         logger.info("    No valid junction candidates found")
@@ -383,10 +361,10 @@ def _process_candidates(candidates, ref_seq, seq_id, kmer_index,
             "total_reads": count,
             "hq_reads": count,
             "spanning_reads": count,
-            "is_hr_signature": classification["is_hr_signature"],
-            "hr_match_len": classification["hr_match_len"],
-            "hr_identity": classification["hr_identity"],
-            "hr_scenario": classification["hr_scenario"],
+            "flanking_repeat": classification["flanking_repeat"],
+            "repeat_len": classification["repeat_len"],
+            "repeat_identity": classification["repeat_identity"],
+            "repeat_geometry": classification["repeat_geometry"],
             "microhomology_bp": classification["microhomology_bp"],
             "microhomology_seq": classification["microhomology_seq"],
         }
@@ -398,7 +376,7 @@ def _process_candidates(candidates, ref_seq, seq_id, kmer_index,
 
     # Log confirmed junctions
     for hit in confirmed:
-        hr = hit.get("is_hr_signature", False)
+        hr = hit.get("flanking_repeat", False)
         mh = hit.get("microhomology_bp", 0)
         logger.info(
             f"    CONFIRMED: {hit['seq_id']}:{hit['dup_start']:,}-{hit['dup_end']:,} "
@@ -413,20 +391,7 @@ def _process_candidates(candidates, ref_seq, seq_id, kmer_index,
 def _filter_confirmed_junctions(candidates, read_counts, ref_seq, seq_id,
                                  kmer_index, min_spanning=1,
                                  hr_complexity_filter=True):
-    """Filter junction candidates by read support and classify.
-
-    Args:
-        candidates: list of junction candidate dicts
-        read_counts: dict from count_junction_reads
-        ref_seq: reference sequence
-        seq_id: sequence ID
-        kmer_index: KmerIndex object
-        min_spanning: minimum spanning reads to confirm
-        hr_complexity_filter: if True, reject HR from low-complexity windows
-
-    Returns:
-        list of confirmed junction dicts with HR + microhomology classification
-    """
+    """Filter junction candidates by read support and classify."""
     confirmed = []
 
     for cand in candidates:
@@ -462,16 +427,16 @@ def _filter_confirmed_junctions(candidates, read_counts, ref_seq, seq_id,
             "hq_reads": hq,
             "spanning_reads": spanning,
             "_screen_spanning": spanning,  # pass 1 count for comparison
-            "is_hr_signature": classification["is_hr_signature"],
-            "hr_match_len": classification["hr_match_len"],
-            "hr_identity": classification["hr_identity"],
-            "hr_scenario": classification["hr_scenario"],
+            "flanking_repeat": classification["flanking_repeat"],
+            "repeat_len": classification["repeat_len"],
+            "repeat_identity": classification["repeat_identity"],
+            "repeat_geometry": classification["repeat_geometry"],
             "microhomology_bp": classification["microhomology_bp"],
             "microhomology_seq": classification["microhomology_seq"],
         }
 
         confirmed.append(result)
-        hr_label = "HR" if classification["is_hr_signature"] else f"MH={classification['microhomology_bp']}bp"
+        hr_label = "HR" if classification["flanking_repeat"] else f"MH={classification['microhomology_bp']}bp"
         logger.debug(
             f"    Screen hit: {seq_id}:{display_start:,}-{display_end:,} "
             f"({cand['end']-cand['start']:,} bp) "
@@ -516,7 +481,7 @@ def _save_results(confirmed, output_dir):
             f.write("# Metadata for Tandem module 3 (-pop)\n")
             f.write("# Name\tStart\tEnd\tSequence\n")
             for junc in confirmed:
-                hr = junc.get("is_hr_signature", False)
+                hr = junc.get("flanking_repeat", False)
                 mh = junc.get("microhomology_bp", 0)
                 mech = "HR" if hr else f"MH{mh}bp"
                 name = f"{mech}_{junc['dup_start']}_{junc['dup_end']}"
@@ -531,7 +496,7 @@ def _save_results(confirmed, output_dir):
         fasta_path = os.path.join(output_dir, "confirmed_junctions.fasta")
         with open(fasta_path, "w") as f:
             for junc in confirmed:
-                hr = junc.get("is_hr_signature", False)
+                hr = junc.get("flanking_repeat", False)
                 mh = junc.get("microhomology_bp", 0)
                 mech = "HR" if hr else f"MH{mh}bp"
                 k = junc.get("junction_k", 0)
@@ -547,3 +512,217 @@ def _save_results(confirmed, output_dir):
                 for i in range(0, len(seq), 80):
                     f.write(seq[i:i+80] + "\n")
         logger.info(f"  Confirmed junction FASTA saved to {fasta_path}")
+
+
+def run_scan(ref_fasta, read1, read2=None, output_dir=".",
+             min_anchor=25, min_support=2, min_size=200, control=None,
+             threads=1, starts=None, ends=None, slop=400, reference_tandems=None):
+    """Find junctions in the reads, no coordinates needed.
+
+    control: junctions.tsv from a scan of a sample without the duplications,
+    such as the ancestor, best run with --min-support 1. Junctions found there
+    too are background (repeats, library artefacts, differences from the
+    reference), not events, and are marked with their control support.
+
+    reference_tandems: Module 1's output for the same reference (its directory
+    or tandem_duplications.tsv). A junction inside one of the reference's
+    tandem duplications or arrays, a whole number of its units long, changes
+    how many copies it has rather than duplicating new sequence, and is
+    marked with it.
+
+    starts, ends: candidate boundaries (1-based), e.g. read off a coverage
+    plot. Every start is paired with every end after it, and each pair is
+    reported: at the best-supported junction within slop bases of both
+    boundaries, or where it was given, with no junction reads, if there is
+    none.
+    """
+    import csv
+
+    from .junction_scan import scan
+    from .kmer_index import KmerIndex
+
+    os.makedirs(output_dir, exist_ok=True)
+    sequences, _ = utils.load_fasta(ref_fasta)
+
+    logger.info("Building reference index")
+    index = KmerIndex(sequences)
+
+    results = []
+    if starts:
+        # as in module 3, given coordinates refer to the main contig
+        seq_id = max(sequences, key=lambda s: len(sequences[s]))
+        seq = sequences[seq_id]
+        pairs = [(s, e) for s in starts for e in ends if s < e <= len(seq)]
+        if not pairs:
+            logger.error(f"No start/end pair fits {seq_id} ({len(seq):,} bp) "
+                         f"with the start before the end")
+            return []
+        logger.info(f"Checking {len(pairs)} start/end pair(s) on {seq_id}, "
+                    f"each boundary matched within {slop} bp")
+        smallest = min(e - s + 1 for s, e in pairs)
+        hits = scan(seq, [read1, read2], min_anchor=min_anchor,
+                    min_size=min(min_size, smallest), index=index,
+                    contig_start=index._seq_offsets[seq_id], threads=threads,
+                    targets=pairs, slop=slop)
+        seen = set()
+        for (s, e), hit in zip(pairs, hits):
+            # several pairs can land on the same junction; list it once
+            if (hit["start"], hit["end"]) in seen:
+                continue
+            seen.add((hit["start"], hit["end"]))
+            hit.update(seq_id=seq_id, provided_start=s, provided_end=e)
+            results.append(hit)
+    else:
+        for seq_id, seq in sequences.items():
+            logger.info(f"Scanning reads against {seq_id}")
+            # one pass over the reads per contig; positions are contig-local
+            for hit in scan(seq, [read1, read2], min_anchor=min_anchor,
+                            min_support=min_support, min_size=min_size,
+                            index=index, contig_start=index._seq_offsets[seq_id],
+                            threads=threads):
+                hit["seq_id"] = seq_id
+                results.append(hit)
+
+    results.sort(key=lambda r: -r["junction_reads"])
+    for r in results:
+        r["junction_sequence"] = _junction_sequence(sequences[r["seq_id"]], r["start"], r["end"])
+
+    if control:
+        background = _read_control(control)
+        for r in results:
+            r["control_reads"] = sum(
+                c["junction_reads"] for c in background
+                if c["seq_id"] == r["seq_id"]
+                and abs(c["start"] - r["start"]) <= CONTROL_SLOP
+                and abs(c["end"] - r["end"]) <= CONTROL_SLOP)
+        n = sum(1 for r in results if r["control_reads"])
+        logger.info(f"  {n} of {len(results)} junction(s) also found in the control")
+
+    if reference_tandems:
+        tandems = _read_reference_tandems(reference_tandems)
+        for r in results:
+            r["reference_tandem"] = _in_reference_tandem(r, tandems)
+        n = sum(1 for r in results if r["reference_tandem"])
+        logger.info(f"  {n} of {len(results)} junction(s) change the copy number of a "
+                    f"tandem duplication or array of the reference "
+                    f"({len(tandems)} read from Module 1)")
+
+    columns = ["seq_id", "start", "end", "size", "microhomology",
+               "junction_reads", "reference_reads", "dosage", "dosage_from",
+               "dosage_low", "dosage_high", "dosage_raw", "junction_visible",
+               "reference_visible", "depth_dosage", "depth_noise"]
+    if starts:
+        columns[1:1] = ["provided_start", "provided_end"]
+    if control:
+        columns.append("control_reads")
+    if reference_tandems:
+        columns.append("reference_tandem")
+    path = os.path.join(output_dir, "junctions.tsv")
+    with open(path, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=columns, delimiter="\t",
+                                lineterminator="\n", extrasaction="ignore")
+        writer.writeheader()
+        writer.writerows(results)
+
+    for r in results:
+        note = f"  control={r['control_reads']}" if control else ""
+        if r.get("reference_tandem"):
+            note += f"  in the reference's {r['reference_tandem']}"
+        given = ""
+        if starts and (r["start"], r["end"]) != (r["provided_start"], r["provided_end"]):
+            given = f" (given {r['provided_start']:,}-{r['provided_end']:,})"
+        logger.info(
+            f"  {r['seq_id']}:{r['start']:,}-{r['end']:,}{given}  {r['size']:,}bp  "
+            f"junction={r['junction_reads']} reference={r['reference_reads']}  "
+            f"dosage={r['dosage']} ({r['dosage_low']}-{r['dosage_high']}) from "
+            f"{r['dosage_from']}  depth={r['depth_dosage']}{note}"
+        )
+    logger.info(f"  Results saved to {path}")
+    return results
+
+
+def _junction_sequence(seq, start, end, k=30):
+    """What a read across the junction carries: the unit's end, then its start."""
+    return seq[max(0, end - k):end] + "|" + seq[start - 1:start - 1 + k]
+
+
+CONTROL_SLOP = 50   # bp; the same background junction lands within a few bases
+
+
+def _read_control(path):
+    import csv
+    rows = []
+    with open(path) as f:
+        for r in csv.DictReader(f, delimiter="\t"):
+            if r.get("seq_id"):
+                rows.append({"seq_id": r["seq_id"], "start": int(r["start"]),
+                             "end": int(r["end"]),
+                             "junction_reads": int(r["junction_reads"])})
+    return rows
+
+
+TANDEM_SLOP = 50    # bp; Module 1's boundaries and a left-aligned junction differ a little
+
+
+def _read_reference_tandems(path):
+    """The reference's tandem duplications and arrays from Module 1.
+
+    path: Module 1's output directory, where tandem_duplications.tsv and
+    short_unit_arrays.tsv are read, or one of those files. Each gives the
+    stretch its copies cover and its period, the distance from one copy's
+    start to the next. Inverted and dispersed pairs are left out: their
+    copies are not side by side.
+    """
+    import csv
+    names = ("tandem_duplications.tsv", "short_unit_arrays.tsv")
+    if os.path.isdir(path):
+        files = [os.path.join(path, n) for n in names if os.path.isfile(os.path.join(path, n))]
+    else:
+        files = [path]
+    tandems = []
+    for name in files:
+        with open(name) as f:
+            for r in csv.DictReader(f, delimiter="\t"):
+                if (r.get("orientation") or "direct") != "direct":
+                    continue
+                if r.get("architecture") == "dispersed_pair":
+                    continue
+                try:
+                    start, size = int(r["copy1_start"]), int(r["size"])
+                    period = int(r["copy2_start"]) - start
+                    gap = int(r["copy2_start"]) - int(r["copy1_end"]) - 1
+                    copies = float(r.get("copy_number") or 2)
+                except (KeyError, TypeError, ValueError):
+                    continue
+                if period <= 0 or gap > max(size, 100):
+                    continue
+                if copies > 2:
+                    end = start + int(round(period * copies)) - 1
+                else:
+                    end = int(r["copy2_end"])
+                tandems.append({"seq_id": r["seq_id"], "start": start, "end": end,
+                                "period": period, "copies": copies})
+    return tandems
+
+
+def _in_reference_tandem(junction, tandems):
+    """How a junction relates to the reference's tandem duplications and arrays:
+    a description of the one whose copy number it changes, or "".
+
+    It must lie inside the stretch the copies cover and be a whole number of
+    periods long, so that it adds or removes whole copies; a junction that
+    merely falls inside a long duplicated stretch is something else.
+    """
+    for t in tandems:
+        if t["seq_id"] != junction["seq_id"]:
+            continue
+        if (junction["start"] < t["start"] - TANDEM_SLOP
+                or junction["end"] > t["end"] + TANDEM_SLOP):
+            continue
+        units = round(junction["size"] / t["period"])
+        off = abs(junction["size"] - units * t["period"])
+        if units >= 1 and off <= max(TANDEM_SLOP, 0.15 * t["period"]):
+            kind = "array" if t["copies"] > 2 else "tandem duplication"
+            copies = f"{t['copies']:g}"
+            return f"{kind} {t['start']}-{t['end']} ({t['period']} bp x {copies})"
+    return ""

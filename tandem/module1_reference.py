@@ -15,7 +15,7 @@ in a reference genome:
 
     Stage 3 — Mechanism classification (sequence-only):
         HR signature detection at outer boundaries + microhomology bp at the
-        inner junction. Reports mechanism_confidence (low/moderate/high)
+        inner junction. Reports search_confidence (low/moderate/high)
         based on copy length, since junction-based inference is less reliable
         at short lengths.
 
@@ -36,18 +36,48 @@ Usage: tandem -r reference.fna
 import logging
 import os
 import json
+from collections import Counter
 from pathlib import Path
 
 from . import utils
 from .junction import KmerIndex, classify_junction, HR_MIN_CONSECUTIVE
+from .repeats import annotate_repeat_families
 
 logger = logging.getLogger("tandem")
 
 
 # Mechanism confidence thresholds (copy length in bp)
-CONFIDENCE_LOW_MAX = 300      # <300bp: flanking windows overlap copy itself
+CONFIDENCE_LOW_MAX = 300      # <300bp: windows of under 150 bp, too short to find or exclude a repeat
 CONFIDENCE_MODERATE_MAX = 500 # 300-500bp: moderate
 # >=500bp: high
+
+# The two copies of a tandem duplication sit next to each other. A wider
+# spacer means two dispersed copies of the same repeat, which is a substrate
+# for a duplication rather than the product of one, and the sequence between
+# them is not a junction. Some slack for filler bases and small indels.
+MAX_TANDEM_GAP = 100
+
+# Junction signatures are erased by substitution. Once the copies have drifted
+# below this identity the microhomology window no longer reflects the event
+# that made it, and the decay runs one way: HR signatures degrade into
+# non-HR-looking ones, never the reverse.
+DIVERGED_BELOW = 99.0
+
+# A copy found at this many loci is a repeat family (IS element, rRNA operon)
+# rather than a one-off duplication.
+REPEAT_FAMILY_MIN_LOCI = 3
+
+
+def _nucmer_has_threads():
+    """MUMmer 4 accepts -t, MUMmer 3 does not."""
+    import subprocess
+    try:
+        out = subprocess.run(
+            ["nucmer", "--help"], capture_output=True, text=True, timeout=10
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return "--threads" in (out.stdout + out.stderr)
 
 
 def run_nucmer_self_alignment(ref_fasta, output_dir, threads=1,
@@ -64,13 +94,25 @@ def run_nucmer_self_alignment(ref_fasta, output_dir, threads=1,
     cmd = [
         "nucmer",
         "--maxmatch",
+        # MUMmer's docs require this for self-alignment. Without it MUMmer 3
+        # drops every repeat as shadowed by the full-length diagonal. MUMmer 4
+        # keeps most of them only because its shadow check never looks at
+        # the first alignment, which is the diagonal; it still drops repeats
+        # shadowed by any other alignment.
+        "--nosimplify",
         "-l", str(min_match),
         "-c", str(min_cluster),
-        "-t", str(threads),
         "--prefix", prefix,
-        str(ref_fasta),
-        str(ref_fasta),
     ]
+    # -t arrived in MUMmer 4. On MUMmer 3 it aborts with "Unknown option".
+    if threads > 1 and _nucmer_has_threads():
+        cmd[1:1] = ["-t", str(threads)]
+    elif threads > 1:
+        logger.warning(
+            "  NUCmer does not accept -t; running single-threaded. "
+            "Install MUMmer >= 4 for a parallel self-alignment."
+        )
+    cmd += [str(ref_fasta), str(ref_fasta)]
     utils.run_command(cmd, description="Running NUCmer self-alignment")
 
     cmd = f"delta-filter -i 80 -l 50 {delta_file}"
@@ -162,12 +204,194 @@ def _sequence_complexity_ok(seq, k=COMPLEXITY_KMER,
     return (len(kmers) / max_possible) >= min_fraction
 
 
+def _units(d, unit):
+    """How many units make period d, give or take indels; 0 if no whole number does."""
+    k = round(d / unit)
+    if k >= 1 and abs(d - k * unit) <= min(max(10, 0.05 * d), unit / 4):
+        return k
+    return 0
+
+
+def _array_regions(periodic, min_copies=2.5):
+    """Tandem arrays from the self-alignments whose two sides overlap.
+
+    Each entry (seq_id, start, end, period, identity) says start..end repeats
+    with that period. A degenerate array seldom aligns to itself in one piece
+    at its own period; the pieces at one, two, three... units cover it
+    between them. Entries that overlap, at whole numbers of one unit, are
+    merged into one region, shortest period first so the unit is the
+    shortest that explains it. Pieces of one array split by up to two units
+    of decayed sequence are joined. A region has to span min_copies units:
+    below that it is two copies with a little more alignment past the
+    junction, not an array.
+    """
+    regions = []
+    for seq_id, start, end, p, identity in sorted(periodic, key=lambda e: e[3]):
+        hits = [r for r in regions
+                if r["seq_id"] == seq_id and _units(p, r["unit"])
+                and start <= r["end"] + r["unit"] // 2
+                and r["start"] - r["unit"] // 2 <= end]
+        if not hits:
+            regions.append({"seq_id": seq_id, "start": start, "end": end,
+                            "unit": p, "identity": identity})
+            continue
+        keep = min(hits, key=lambda r: r["unit"])
+        for r in hits:
+            if r is not keep and _units(r["unit"], keep["unit"]):
+                keep["start"] = min(keep["start"], r["start"])
+                keep["end"] = max(keep["end"], r["end"])
+                if _units(r["unit"], keep["unit"]) == 1:
+                    keep["identity"] = max(keep["identity"], r["identity"])
+                regions.remove(r)
+        keep["start"] = min(keep["start"], start)
+        keep["end"] = max(keep["end"], end)
+        if _units(p, keep["unit"]) == 1:
+            keep["identity"] = max(keep["identity"], identity)
+
+    regions.sort(key=lambda r: (r["seq_id"], r["start"]))
+    joined = []
+    for r in regions:
+        last = joined[-1] if joined else None
+        if (last and last["seq_id"] == r["seq_id"]
+                and _units(r["unit"], last["unit"]) == 1
+                and r["start"] - last["end"] <= 2 * last["unit"]):
+            last["end"] = max(last["end"], r["end"])
+            last["identity"] = max(last["identity"], r["identity"])
+        else:
+            joined.append(r)
+    for r in joined:
+        r["copies"] = (r["end"] - r["start"] + 1) / r["unit"]
+    return [r for r in joined if r["copies"] >= min_copies]
+
+
+def _array_call(region):
+    """One call for a whole array, its first two units standing in as copies."""
+    start, unit = region["start"], region["unit"]
+    copies = round(region["copies"], 1)
+    if copies == int(copies):
+        copies = int(copies)
+    return {
+        "seq_id": region["seq_id"],
+        "copy1_start": start,
+        "copy1_end": start + unit - 1,
+        "copy2_start": start + unit,
+        "copy2_end": start + 2 * unit - 1,
+        "distance": 0,
+        "nucmer_overlap_bp": 0,
+        "circular_closer": False,
+        "size": unit,
+        "copy_number": copies,
+        "identity": region["identity"],
+        "orientation": "direct",
+        "structure": "tandem",
+        "distance_to_size_ratio": 0.0,
+        "detection_source": "native",
+    }
+
+
+def _period(call):
+    """Distance from the start of one copy to the start of the next."""
+    return call["copy2_start"] - call["copy1_start"] - call["nucmer_overlap_bp"]
+
+
+def _extent(call):
+    """First and last base of a call, all copies included."""
+    if call["copy_number"] > 2:
+        return call["copy1_start"], call["copy1_start"] + call["size"] * call["copy_number"] - 1
+    return call["copy1_start"], call["copy2_end"]
+
+
+def _mark_unit_multiples(calls, regions):
+    """Set aside pair calls that only restate an array.
+
+    Inside an array of six 113 bp units, the self-alignment offset by 339 bp
+    looks like a two-copy tandem, and a piece of the alignment at 113 bp
+    like another, though neither is a duplication of its own. A pair lying
+    inside an array region, at a whole number of its units, becomes a
+    `unit_multiple` and records the unit. Regions whose unit is too short to
+    report as an array still count.
+    """
+    by_seq = {}
+    for r in sorted(regions, key=lambda r: r["unit"]):  # shortest unit first
+        by_seq.setdefault(r["seq_id"], []).append(r)
+
+    n = 0
+    for call in calls:
+        if call["structure"] not in ("tandem", "dispersed_pair"):
+            continue
+        d = _period(call)
+        a, b = _extent(call)
+        for r in by_seq.get(call["seq_id"], []):
+            slack = r["unit"] // 2
+            if r["start"] - slack <= a and b <= r["end"] + slack and _units(d, r["unit"]):
+                call["structure"] = "unit_multiple"
+                call["unit"] = r["unit"]
+                n += 1
+                break
+    return n
+
+
+def _sides(call):
+    """The two stretches a call aligns to each other. For an array that is
+    every unit but the last against every unit but the first."""
+    if call["copy_number"] > 2:
+        start, end = _extent(call)
+        return (start, end - call["size"]), (start + call["size"], end)
+    return ((call["copy1_start"], call["copy1_end"]),
+            (call["copy2_start"], call["copy2_end"]))
+
+
+def _covered(a, b):
+    """Fraction of stretch a that lies inside stretch b."""
+    return max(0, min(a[1], b[1]) - max(a[0], b[0]) + 1) / (a[1] - a[0] + 1)
+
+
+def _drop_same_pair(calls, slack=20):
+    """Keep one call per pair of copies.
+
+    NUCmer aligns every pair of copies twice, once from each side. Once the
+    copies have diverged the two alignments can stop at different bases, and
+    the same pair turns up twice with slightly different ends. Two direct
+    calls with the same period whose sides mostly overlap are one pair; the
+    longer one stays. Copies of a family spaced evenly along the genome have
+    the same period too, but their sides don't overlap.
+    """
+    direct = ("tandem", "dispersed_pair")
+    kept = []
+    for call in sorted(calls, key=lambda c: _extent(c)[0] - _extent(c)[1]):
+        if call["structure"] in direct:
+            d = _period(call)
+            one, two = _sides(call)
+            same = False
+            for other in kept:
+                if (other["seq_id"] != call["seq_id"]
+                        or other["structure"] not in direct
+                        or abs(_period(other) - d) > slack):
+                    continue
+                other_one, other_two = _sides(other)
+                if _covered(one, other_one) >= 0.5 and _covered(two, other_two) >= 0.5:
+                    same = True
+                    break
+            if same:
+                continue
+        kept.append(call)
+    return kept, len(calls) - len(kept)
+
+
 def identify_tandem_duplications(alignments, seq_lengths, max_distance=50000,
                                   min_identity=80.0, min_size=200,
                                   circular=True, sequences=None,
                                   short_dup_threshold=SHORT_DUP_THRESHOLD,
-                                  apply_short_dup_filters=True):
+                                  apply_short_dup_filters=True,
+                                  max_tandem_gap=MAX_TANDEM_GAP):
     """Identify tandem duplications from NUCmer self-alignment results.
+
+    Every hit is labelled `tandem` or `dispersed_pair` depending on the gap
+    between the copies, `inverted_pair` when one copy is reversed, or
+    `unit_multiple` when its period is a whole multiple of a shorter repeat
+    unit in the same region. Only tandems carry a junction; the rest are
+    reported separately and are not duplications. A pair aligned twice is
+    reported once.
 
     Short-duplication filters (applied to duplications below
     short_dup_threshold, default 500bp, when apply_short_dup_filters=True):
@@ -182,23 +406,9 @@ def identify_tandem_duplications(alignments, seq_lengths, max_distance=50000,
 
     These filters reduce false positives for short duplications, where
     random sequence similarity is more likely to produce a signal.
-
-    Args:
-        alignments: list of alignment dicts from parse_coords
-        seq_lengths: dict of {seq_id: length} for circular distance
-        max_distance: maximum distance between copies to consider tandem
-        min_identity: minimum alignment identity
-        min_size: minimum duplication size (default 200)
-        circular: if True, compute circular distance
-        sequences: dict of {seq_id: sequence} — required if complexity
-                   check is applied (i.e. when short-dup filters are on)
-        short_dup_threshold: bp threshold below which extra filters apply
-        apply_short_dup_filters: if False, skip short-duplication filters
-
-    Returns:
-        list of tandem duplication dicts
     """
     tandems = []
+    periodic = []
     seen = set()
     n_filtered_by_short = 0
     n_filtered_by_complexity = 0
@@ -221,8 +431,11 @@ def identify_tandem_duplications(alignments, seq_lengths, max_distance=50000,
         if abs(pos1[0] - pos2[0]) < 10 and abs(pos1[1] - pos2[1]) < 10:
             continue
 
+        inverted = (aln["ref_start"] < aln["ref_end"]) != (aln["qry_start"] < aln["qry_end"])
+
         # Calculate distance and assign copy order
         nucmer_overlap_bp = 0
+        unit_size = aln["ref_alen"]
 
         if pos1[1] < pos2[0]:
             linear_distance = pos2[0] - pos1[1] - 1
@@ -231,17 +444,24 @@ def identify_tandem_duplications(alignments, seq_lengths, max_distance=50000,
             linear_distance = pos1[0] - pos2[1] - 1
             copy1, copy2 = pos2, pos1
         else:
-            # Overlapping copies
-            overlap = min(pos1[1], pos2[1]) - max(pos1[0], pos2[0]) + 1
-            if overlap > aln["ref_alen"] * 0.1:
+            # The two sides overlap. A little is the microhomology at a
+            # two-copy junction; more means the stretch repeats with this
+            # period, and arrays are built from those after the loop.
+            # Reversed and overlapping is one stretch folding back on itself.
+            if inverted:
                 continue
-
+            overlap = min(pos1[1], pos2[1]) - max(pos1[0], pos2[0]) + 1
+            first, second = (pos1, pos2) if pos1[0] <= pos2[0] else (pos2, pos1)
+            if overlap > aln["ref_alen"] * 0.1:
+                period = second[0] - first[0]
+                # A repeat unit shifts both ends of the alignment by the same
+                # amount. One that starts on the diagonal and drifts off it
+                # through a low-complexity stretch says nothing about a unit.
+                if period >= 10 and abs(second[1] - first[1] - period) <= max(10, period // 10):
+                    periodic.append((aln["ref_id"], first[0], second[1], period, aln["identity"]))
+                continue
             nucmer_overlap_bp = overlap
-            if pos1[0] <= pos2[0]:
-                copy1, copy2 = list(pos1), list(pos2)
-            else:
-                copy1, copy2 = list(pos2), list(pos1)
-
+            copy1, copy2 = list(first), list(second)
             copy2[0] = copy1[1] + 1
             linear_distance = 0
 
@@ -265,22 +485,17 @@ def identify_tandem_duplications(alignments, seq_lengths, max_distance=50000,
         if distance > max_distance:
             continue
 
-        # Determine orientation
-        ref_fwd = aln["ref_start"] < aln["ref_end"]
-        qry_fwd = aln["qry_start"] < aln["qry_end"]
-        orientation = "direct" if ref_fwd == qry_fwd else "inverted"
+        orientation = "inverted" if inverted else "direct"
 
-        # Classify proximity
-        if nucmer_overlap_bp > 0:
-            proximity = "adjacent"
-        elif distance <= 0:
-            proximity = "adjacent"
-        elif distance <= 500:
-            proximity = "adjacent"
-        elif distance <= 2000:
-            proximity = "near"
+        # decides whether the sequence between the copies is a junction at
+        # all. Reversed copies have none however close they are: the end of
+        # one never meets the start of the other.
+        if inverted:
+            structure = "inverted_pair"
+        elif nucmer_overlap_bp > 0 or distance <= max_tandem_gap:
+            structure = "tandem"
         else:
-            proximity = "proximal"
+            structure = "dispersed_pair"
 
         # Deduplicate
         key = (seq_id, copy1[0], copy1[1], copy2[0], copy2[1])
@@ -289,7 +504,7 @@ def identify_tandem_duplications(alignments, seq_lengths, max_distance=50000,
         seen.add(key)
 
         # Short-duplication filters (<short_dup_threshold bp)
-        dup_size = aln["ref_alen"]
+        dup_size = unit_size
         if apply_short_dup_filters and dup_size < short_dup_threshold:
             # Filter 1: gap must be shorter than copy length
             if distance >= dup_size:
@@ -315,13 +530,42 @@ def identify_tandem_duplications(alignments, seq_lengths, max_distance=50000,
             "distance": distance,
             "nucmer_overlap_bp": nucmer_overlap_bp,
             "circular_closer": is_circular_closer,
-            "size": aln["ref_alen"],
+            "size": unit_size,
+            "copy_number": 2,
             "identity": aln["identity"],
             "orientation": orientation,
-            "proximity_class": proximity,
-            "distance_to_size_ratio": round(distance / aln["ref_alen"], 2) if aln["ref_alen"] > 0 else 0.0,
+            "structure": structure,
+            "distance_to_size_ratio": round(distance / unit_size, 2) if unit_size > 0 else 0.0,
             "detection_source": "native",
         })
+
+    regions = _array_regions(periodic)
+    tandems, n_twice = _drop_same_pair(tandems)
+    n_multiples = _mark_unit_multiples(tandems, regions)
+
+    # Arrays whose unit is below the size floor aren't duplications to report,
+    # but they are listed so they can be counted.
+    n_arrays = n_short = 0
+    for r in regions:
+        if apply_short_dup_filters and r["unit"] < short_dup_threshold and sequences is not None:
+            ref = sequences.get(r["seq_id"], "")
+            if ref and not _sequence_complexity_ok(ref[r["start"] - 1:r["start"] - 1 + r["unit"]]):
+                n_filtered_by_complexity += 1
+                continue
+        call = _array_call(r)
+        if r["unit"] < min_size:
+            call["structure"] = "short_unit_array"
+            n_short += 1
+        else:
+            n_arrays += 1
+        tandems.append(call)
+
+    if n_twice:
+        logger.info(f"  {n_twice} call(s) dropped as the same pair aligned twice")
+    if n_arrays or n_short:
+        logger.info(f"  {n_arrays} tandem array(s), and {n_short} with a unit below {min_size}bp")
+    if n_multiples:
+        logger.info(f"  {n_multiples} call(s) are whole multiples of an array's unit")
 
     tandems.sort(key=lambda t: (t["seq_id"], t["copy1_start"]))
 
@@ -338,37 +582,34 @@ def identify_tandem_duplications(alignments, seq_lengths, max_distance=50000,
             f"{n_filtered_by_complexity} for low complexity"
         )
 
-    logger.info(f"  Identified {len(tandems)} tandem duplication candidates")
+    n = Counter(t["structure"] for t in tandems)
+    logger.info(
+        f"  {n['tandem']} tandem duplication candidate(s), "
+        f"{n['dispersed_pair']} dispersed repeat pair(s) (gap > {max_tandem_gap}bp), "
+        f"{n['inverted_pair']} inverted pair(s), "
+        f"{n['unit_multiple']} multiple(s) of a shorter unit, "
+        f"{n['short_unit_array']} array(s) with a unit below {min_size}bp"
+    )
     return tandems
 
 
-def classify_tandem_mechanisms(tandems, sequences, flag_distance=2000,
-                                hr_min_consec=None, hr_min_identity=None,
-                                hr_max_inward=None, hr_outward_ext=None,
-                                hr_complexity_filter=True):
-    """Classify the mechanism for each tandem duplication.
+def describe_junctions(tandems, sequences, flag_distance=2000,
+                       hr_min_consec=None, hr_min_identity=None,
+                       hr_max_inward=None, hr_outward_ext=None,
+                       hr_complexity_filter=True,
+                       diverged_below=DIVERGED_BELOW):
+    """Describe the sequence architecture at each junction.
 
-    Uses the two-step approach:
-    1. HR signature detection (flanking repeat alignment)
-    2. Microhomology bp measurement
+    Records whether an extended direct repeat flanks the duplicated segment
+    (and in which geometry), and the microhomology at the inner junction.
 
-    Classification notes (flags):
-    - 'junction_distant': distance > flag_distance, junction signal may be degraded
-    - 'too_small_for_HR_check': copy too small for meaningful HR detection
+    These are observations about substrate, not mechanism calls. What a
+    reference genome shows is what is there now: substitution rewrites
+    junctions, and gene conversion between tandem copies can hold a flanking
+    repeat identical long after the event. Copies below diverged_below are
+    flagged, not filtered.
 
-    Args:
-        tandems: list of tandem duplication dicts (1-based coords)
-        sequences: dict of {seq_id: sequence_string}
-        flag_distance: distance threshold for junction_distant flag
-        hr_min_consec: override for HR_MIN_CONSECUTIVE (default: module default)
-        hr_min_identity: override for HR_MIN_IDENTITY (default: module default)
-        hr_max_inward: override for HR_MAX_WINDOW (default: module default)
-        hr_outward_ext: override for HR_OUTWARD_EXTENSION (default: module default)
-        hr_complexity_filter: if True, reject HR calls where both flanking
-            windows are low-complexity (microsatellite periodicity). Default True.
-
-    Returns:
-        Updated list with classification fields added
+    Notes column: junction_distant, too_small_for_repeat_search, copies_diverged
     """
     # Build HR kwargs, falling back to module defaults for any not provided
     from .junction import (
@@ -395,8 +636,9 @@ def classify_tandem_mechanisms(tandems, sequences, flag_distance=2000,
     )
 
     classified = []
-    hr_count = 0
-    total = 0
+    tally = {"flanking_repeat": 0, "no_flanking_repeat": 0,
+             "array": 0, "dispersed_pair": 0}
+    n_diverged = 0
 
     for td in tandems:
         seq = sequences.get(td["seq_id"])
@@ -410,61 +652,60 @@ def classify_tandem_mechanisms(tandems, sequences, flag_distance=2000,
         c2s_0 = td["copy2_start"] - 1
         c2e_0 = td["copy2_end"]
 
-        # Classify junction
-        classification = classify_junction(seq, c1s_0, c1e_0, c2s_0, c2e_0, **hr_kwargs)
+        seen = classify_junction(seq, c1s_0, c1e_0, c2s_0, c2e_0,
+                                 overlap=td.get("nucmer_overlap_bp", 0), **hr_kwargs)
+        for key in ("flanking_repeat", "repeat_len", "repeat_identity",
+                    "repeat_geometry", "microhomology_bp", "microhomology_seq",
+                    "junction_gap_bp", "junction_seq"):
+            td[key] = seen[key]
 
-        td["is_hr_signature"] = classification["is_hr_signature"]
-        td["hr_match_len"] = classification["hr_match_len"]
-        td["hr_identity"] = classification["hr_identity"]
-        td["hr_scenario"] = classification["hr_scenario"]
-        td["microhomology_bp"] = classification["microhomology_bp"]
-        td["microhomology_seq"] = classification["microhomology_seq"]
-        td["junction_gap_bp"] = classification["junction_gap_bp"]
-        td["junction_seq"] = classification["junction_seq"]
-
-        # NUCmer overlap → microhomology consolidation.
-        # When NUCmer reports overlapping copies (nucmer_overlap_bp > 0),
-        # the overlap resolution shifts copy2's start past copy1's end.
-        # find_microhomology then sees abutting copies and returns 0.
-        # But the NUCmer overlap IS the microhomology — it's the shared
-        # sequence at the junction that NUCmer detected as alignment overlap.
-        # Consolidate: use the larger of the two values.
-        nucmer_overlap = td.get("nucmer_overlap_bp", 0)
-        if nucmer_overlap > td["microhomology_bp"]:
-            td["microhomology_bp"] = nucmer_overlap
-            # Can't recover exact sequence after overlap resolution
-            td["microhomology_seq"] = f"(from_nucmer_overlap_{nucmer_overlap}bp)"
-
-        # Mechanism confidence based on copy length.
-        # Below 300bp, the adaptive HR search window (dup_length // 2)
-        # is small relative to the copy, making mechanism inference
-        # less reliable. Above 500bp, flanking inference is robust.
+        # how far out the flanking search could look; not a biological claim
         copy_len = td["size"]
         if copy_len < CONFIDENCE_LOW_MAX:
-            td["mechanism_confidence"] = "low"
+            td["search_confidence"] = "low"
         elif copy_len < CONFIDENCE_MODERATE_MAX:
-            td["mechanism_confidence"] = "moderate"
+            td["search_confidence"] = "moderate"
         else:
-            td["mechanism_confidence"] = "high"
+            td["search_confidence"] = "high"
 
-        # Build classification_note flags
+        # Arrays and dispersed pairs get their own labels: an array is
+        # flanked by a full copy of itself at every internal junction, and a
+        # dispersed pair has no junction.
+        if td.get("structure", "tandem") != "tandem":
+            td["architecture"] = "dispersed_pair"
+        elif td.get("copy_number", 2) > 2:
+            td["architecture"] = "array"
+        elif td["flanking_repeat"]:
+            td["architecture"] = "flanking_repeat"
+        else:
+            td["architecture"] = "no_flanking_repeat"
+
+        td["copies_diverged"] = td["identity"] < diverged_below
+
         notes = []
+        if td["copies_diverged"]:
+            notes.append("copies_diverged")
         if td["distance"] > flag_distance:
             notes.append("junction_distant")
         if td["size"] < 2 * HR_MIN_CONSECUTIVE:
-            notes.append("too_small_for_HR_check")
-
-        td["classification_note"] = ";".join(notes) if notes else ""
+            notes.append("too_small_for_repeat_search")
+        td["classification_note"] = ";".join(notes)
 
         classified.append(td)
-        total += 1
-        if classification["is_hr_signature"]:
-            hr_count += 1
+        tally[td["architecture"]] += 1
+        if td["copies_diverged"] and td["architecture"] in ("flanking_repeat", "no_flanking_repeat"):
+            n_diverged += 1
 
     logger.info(
-        f"  Classification: {total} total, "
-        f"{hr_count} HR-like, {total - hr_count} non-HR"
+        f"  Junction architecture: {tally['flanking_repeat']} with flanking "
+        f"direct repeat, {tally['no_flanking_repeat']} without, "
+        f"{tally['array']} array(s), {tally['dispersed_pair']} dispersed pair(s)"
     )
+    if n_diverged:
+        logger.info(
+            f"  {n_diverged} of these have copies below {diverged_below}% identity; "
+            f"the repeat observation describes the present substrate, not formation"
+        )
 
     # Log flag counts
     flag_counts = {}
@@ -480,7 +721,7 @@ def classify_tandem_mechanisms(tandems, sequences, flag_distance=2000,
     # Log microhomology distribution for non-HR
     mh_dist = {}
     for td in classified:
-        if not td["is_hr_signature"]:
+        if not td["flanking_repeat"]:
             mh = td["microhomology_bp"]
             mh_dist[mh] = mh_dist.get(mh, 0) + 1
     if mh_dist:
@@ -493,12 +734,7 @@ def classify_tandem_mechanisms(tandems, sequences, flag_distance=2000,
 
 
 def _parse_gff_cds_features(annotation_path):
-    """Parse a GFF3 file and return a list of CDS features.
-
-    Returns:
-        dict of seq_id -> list of (start, end, strand) tuples in 1-based
-        inclusive coordinates.
-    """
+    """Parse a GFF3 file and return a list of CDS features."""
     cds_by_seq = {}
     with open(annotation_path) as f:
         for line in f:
@@ -530,12 +766,7 @@ def _parse_gff_cds_features(annotation_path):
 
 
 def _parse_genbank_cds_features(annotation_path):
-    """Parse a GenBank file and return a list of CDS features.
-
-    Returns:
-        dict of seq_id -> list of (start, end, strand) tuples in 1-based
-        inclusive coordinates.
-    """
+    """Parse a GenBank file and return a list of CDS features."""
     try:
         from Bio import SeqIO
     except ImportError:
@@ -566,17 +797,7 @@ def _parse_genbank_cds_features(annotation_path):
 
 def _count_cds_in_interval(cds_list, interval_start, interval_end,
                             min_overlap_frac=0.5):
-    """Count CDS fully contained (or >= min_overlap_frac overlapping) in interval.
-
-    Args:
-        cds_list: list of (cds_start, cds_end, strand) tuples (1-based inclusive)
-        interval_start: 1-based inclusive start
-        interval_end: 1-based inclusive end
-        min_overlap_frac: fraction of CDS that must be inside the interval
-
-    Returns:
-        (n_fully_contained, n_partial)
-    """
+    """Count CDS fully contained (or >= min_overlap_frac overlapping) in interval."""
     n_full = 0
     n_partial = 0
     for cds_start, cds_end, _ in cds_list:
@@ -632,15 +853,7 @@ def _classify_content_category(n_cds_copy1, n_cds_gap, gap_bp):
 
 
 def _classify_boundary_type(cds_list, boundary_pos):
-    """Determine whether a boundary falls inside a CDS, at a CDS edge, or in IGS.
-
-    Args:
-        cds_list: list of (cds_start, cds_end, strand) tuples (1-based inclusive)
-        boundary_pos: 1-based coordinate to check
-
-    Returns:
-        str: "intragenic" | "cds_boundary" | "intergenic"
-    """
+    """Determine whether a boundary falls inside a CDS, at a CDS edge, or in IGS."""
     EDGE_TOLERANCE = 3  # bp tolerance for "at CDS edge"
     for cds_start, cds_end, _ in cds_list:
         if boundary_pos < cds_start - EDGE_TOLERANCE:
@@ -666,16 +879,6 @@ def subcategorize_by_annotation(tandems, annotation_path):
     (intergenic / tandem_single_gene / tandem_segmental / proximal_*) and
     a boundary_type describing where the duplication boundaries sit
     relative to CDS features.
-
-    Args:
-        tandems: list of tandem dicts from Stage 1 (with 1-based copy1_start,
-                 copy1_end, copy2_start, copy2_end)
-        annotation_path: path to GFF3 or GenBank file
-
-    Returns:
-        Updated list with fields added: n_cds_copy1, n_cds_copy2, n_cds_gap,
-        content_category, boundary_type. If annotation parsing fails, each
-        tandem gets "NA" for all Stage 2 fields.
     """
     # Detect format from extension
     path = str(annotation_path).lower()
@@ -775,9 +978,6 @@ def _load_detection_input_tsv(tsv_path, sequences, seq_lengths,
     Lines starting with '#' are treated as comments. The first
     non-comment row may be a header (auto-detected if its copy1_start
     is not numeric).
-
-    Returns:
-        list of tandem duplication dicts compatible with Stage 3
     """
     tandems = []
     n_skipped = 0
@@ -903,7 +1103,11 @@ def run_module1(ref_fasta, output_dir, threads=1, max_distance=50000,
                 detection_input=None,
                 hr_min_consec=None, hr_min_identity=None,
                 hr_max_inward=None, hr_outward_ext=None,
-                hr_complexity_filter=True):
+                hr_complexity_filter=True,
+                max_tandem_gap=MAX_TANDEM_GAP,
+                diverged_below=DIVERGED_BELOW,
+                repeat_family_min_loci=REPEAT_FAMILY_MIN_LOCI,
+                keep_dispersed=False):
     """Run the complete three-stage module 1 pipeline.
 
     Stage 1 — Detection (sequence-geometric, always runs):
@@ -917,30 +1121,6 @@ def run_module1(ref_fasta, output_dir, threads=1, max_distance=50000,
 
     Stage 3 — Mechanism classification (sequence-only, always runs):
       HR signature detection + microhomology bp + mechanism confidence.
-
-    Args:
-        ref_fasta: path to reference FASTA
-        output_dir: output directory
-        threads: number of threads
-        max_distance: maximum distance between copies (default 50000)
-        min_identity: minimum alignment identity (default 80.0)
-        min_size: minimum duplication size in bp (default 200)
-        circular: compute circular distance for bacterial genomes
-        flag_distance: distance threshold for junction_distant flag
-        annotation: optional path to GFF3 or GenBank file (enables Stage 2)
-        apply_short_dup_filters: apply extra filters for duplications
-            below SHORT_DUP_THRESHOLD bp (default True)
-        detection_input: optional TSV with pre-computed coordinates
-            (columns: seq_id, copy1_start, copy1_end, copy2_start, copy2_end;
-            optional: size, identity, orientation). If provided, Stage 1
-            NUCmer detection is skipped.
-        hr_min_consec: override HR_MIN_CONSECUTIVE
-        hr_min_identity: override HR_MIN_IDENTITY
-        hr_max_inward: override HR_MAX_WINDOW
-        hr_outward_ext: override HR_OUTWARD_EXTENSION
-
-    Returns:
-        list of classified tandem duplications
     """
     logger.info("=" * 60)
     logger.info("Module 1: Reference genome tandem duplication detection")
@@ -1004,11 +1184,45 @@ def run_module1(ref_fasta, output_dir, threads=1, max_distance=50000,
             circular=circular,
             sequences=sequences,
             apply_short_dup_filters=apply_short_dup_filters,
+            max_tandem_gap=max_tandem_gap,
         )
+        annotate_repeat_families(
+            tandems, alignments, min_loci=repeat_family_min_loci
+        )
+
+    # Not duplications; mixing them into the main table is what makes an IS
+    # pair a few kb apart look like a result. Both files are written even when
+    # empty, so a rerun into the same folder can't leave an old one behind.
+    dispersed = [t for t in tandems if t.get("structure") == "dispersed_pair"]
+    inverted = [t for t in tandems if t.get("structure") == "inverted_pair"]
+    multiples = [t for t in tandems if t.get("structure") == "unit_multiple"]
+    short_arrays = [t for t in tandems if t.get("structure") == "short_unit_array"]
+    _save_pairs(dispersed, output_dir, "dispersed_pairs.tsv")
+    _save_pairs(inverted, output_dir, "inverted_pairs.tsv")
+    _save_pairs(multiples, output_dir, "unit_multiples.tsv", extra=("unit",))
+    _save_pairs(short_arrays, output_dir, "short_unit_arrays.tsv", extra=("copy_number",))
+    if dispersed and not keep_dispersed:
+        logger.info(
+            f"  {len(dispersed)} dispersed pair(s) written to "
+            f"dispersed_pairs.tsv (use --keep-dispersed to merge them in)"
+        )
+    if inverted:
+        logger.info(f"  {len(inverted)} inverted pair(s) written to inverted_pairs.tsv")
+    if multiples:
+        logger.info(f"  {len(multiples)} multiple(s) of a shorter unit written to unit_multiples.tsv")
+    if short_arrays:
+        logger.info(f"  {len(short_arrays)} array(s) with a unit below {min_size}bp written "
+                    f"to short_unit_arrays.tsv")
+
+    keep = {"tandem", None}
+    if keep_dispersed:
+        keep.add("dispersed_pair")
+    tandems = [t for t in tandems if t.get("structure") in keep]
 
     if not tandems:
         logger.info("  No tandem duplications detected.")
         _save_results([], output_dir)
+        _save_copies([], sequences, output_dir)
         return []
 
     # Stage 2: Optional CDS subcategorization
@@ -1027,23 +1241,71 @@ def run_module1(ref_fasta, output_dir, threads=1, max_distance=50000,
             "Stage 2 skipped (no annotation provided; use --annotation to enable)"
         )
 
-    # Stage 3: Classify mechanisms
+    # Stage 3: what the junctions look like
     logger.info("=" * 60)
-    logger.info("Stage 3: Mechanism classification")
+    logger.info("Stage 3: Junction architecture")
     logger.info("=" * 60)
-    classified = classify_tandem_mechanisms(
+    classified = describe_junctions(
         tandems, sequences, flag_distance=flag_distance,
         hr_min_consec=hr_min_consec,
         hr_min_identity=hr_min_identity,
         hr_max_inward=hr_max_inward,
         hr_outward_ext=hr_outward_ext,
         hr_complexity_filter=hr_complexity_filter,
+        diverged_below=diverged_below,
     )
 
     # Save results
     _save_results(classified, output_dir)
+    _save_copies(classified, sequences, output_dir)
 
     return classified
+
+
+def copy_spans(call):
+    """(start, end) of each copy, 1-based inclusive; every unit of an array."""
+    n = call.get("copy_number", 2)
+    if n > 2:
+        unit, start = call["size"], call["copy1_start"]
+        stop = start + round(n * unit) - 1
+        return [(s, min(s + unit - 1, stop)) for s in range(start, stop + 1, unit)]
+    return [(call["copy1_start"], call["copy1_end"]),
+            (call["copy2_start"], call["copy2_end"])]
+
+
+def _save_copies(tandems, sequences, output_dir):
+    """Each copy's sequence, named <row>.<copy> after the report's numbering."""
+    path = os.path.join(output_dir, "copies.fasta")
+    with open(path, "w") as f:
+        for i, td in enumerate(tandems, 1):
+            seq = sequences.get(td["seq_id"], "")
+            for j, (start, end) in enumerate(copy_spans(td), 1):
+                copy = seq[start - 1:end]
+                f.write(f">{i}.{j} {td['seq_id']}:{start}-{end}\n")
+                for k in range(0, len(copy), 70):
+                    f.write(copy[k:k + 70] + "\n")
+    if tandems:
+        logger.info(f"  Copy sequences saved to {path}")
+
+
+def _save_pairs(pairs, output_dir, name, extra=()):
+    """Repeat pairs that are not tandem duplications.
+
+    Direct copies too far apart are the substrate an unequal exchange acts
+    on; inverted copies are what an inversion needs. Neither is a duplication,
+    and nor is a multiple of a shorter unit inside an array. Arrays whose unit
+    is below the size floor go through here too.
+    """
+    path = os.path.join(output_dir, name)
+    header = [
+        "seq_id", "copy1_start", "copy1_end", "copy2_start", "copy2_end",
+        "distance", "size", "identity", "orientation",
+        "repeat_loci", "dispersed_family", *extra,
+    ]
+    with open(path, "w") as f:
+        f.write("\t".join(header) + "\n")
+        for pair in pairs:
+            f.write("\t".join(str(pair.get(h, "")) for h in header) + "\n")
 
 
 def _save_results(tandems, output_dir):
@@ -1052,7 +1314,7 @@ def _save_results(tandems, output_dir):
     Output columns are grouped by stage:
       Stage 1 (always): seq_id, copy coords, distance, size, identity
       Stage 2 (if annotation provided): n_cds_*, content_category, boundary_type
-      Stage 3 (always): HR/microhomology classification + mechanism_confidence
+      Stage 3 (always): HR/microhomology classification + search_confidence
     """
     tsv_path = os.path.join(output_dir, "tandem_duplications.tsv")
     with open(tsv_path, "w") as f:
@@ -1060,16 +1322,17 @@ def _save_results(tandems, output_dir):
             # Stage 1 — Detection
             "seq_id", "copy1_start", "copy1_end", "copy2_start", "copy2_end",
             "distance", "nucmer_overlap_bp", "circular_closer",
-            "size", "identity", "orientation", "proximity_class",
-            "distance_to_size_ratio", "detection_source",
+            "size", "copy_number", "identity", "orientation", "structure",
+            "distance_to_size_ratio", "repeat_loci", "dispersed_family",
+            "detection_source",
             # Stage 2 — CDS subcategorization (NA if no annotation)
             "n_cds_copy1", "n_cds_copy2", "n_cds_gap",
             "content_category", "boundary_type",
             # Stage 3 — Mechanism classification
-            "is_hr_signature", "hr_match_len", "hr_identity", "hr_scenario",
+            "flanking_repeat", "repeat_len", "repeat_identity", "repeat_geometry",
             "microhomology_bp", "microhomology_seq",
             "junction_gap_bp", "junction_seq",
-            "mechanism_confidence",
+            "architecture", "copies_diverged", "search_confidence",
             "classification_note",
         ]
         f.write("\t".join(header) + "\n")

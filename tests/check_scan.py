@@ -1,0 +1,447 @@
+"""Module 2 scan checks on simulated reads with known answers.
+
+    python tests/check_scan.py WORKDIR
+
+Covers the cases real data throws at the scanner: reads running across the
+origin of a circular chromosome, a duplication on a second contig, a small
+indel that should stay below the size floor, a repeat right beside the
+junction, long microhomology at the junction, near-identical and diverged
+repeat copies with sequencing errors, a crossover inside a diverged repeat,
+background marked from a control sample, boundaries
+given only roughly, a junction with a repeat at one end, and one no read can
+cross.
+Prints PASS/FAIL per case and exits non-zero if anything failed.
+"""
+
+import csv
+import os
+import random
+import subprocess
+import sys
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+SIMULATE = os.path.join(HERE, "simulate_reads.py")
+
+
+def write_fasta(path, records):
+    with open(path, "w") as f:
+        for name, seq in records:
+            f.write(f">{name}\n")
+            for i in range(0, len(seq), 70):
+                f.write(seq[i:i + 70] + "\n")
+
+
+def simulate(ref, prefix, start, end, freq, seed, depth=100, error=0.001,
+             read_length=150, insert=350):
+    subprocess.run(
+        [sys.executable, SIMULATE, ref, prefix, "--start", str(start),
+         "--end", str(end), "--frequency", str(freq), "--depth", str(depth),
+         "--error", str(error), "--read-length", str(read_length),
+         "--insert", str(insert), "--circular", "--seed", str(seed)],
+        check=True, capture_output=True)
+    return prefix + "_R1.fq", prefix + "_R2.fq"
+
+
+def concat(paths, out):
+    with open(out, "w") as o:
+        for p in paths:
+            with open(p) as f:
+                o.write(f.read())
+    return out
+
+
+def run_scan(ref, r1, r2, outdir, extra=()):
+    subprocess.run(["tandem", "-r", ref, "-i", r1, "-I", r2, "-iso",
+                    "-o", outdir, *extra], check=True, capture_output=True)
+    with open(os.path.join(outdir, "junctions.tsv")) as f:
+        return list(csv.DictReader(f, delimiter="\t"))
+
+
+def run_population(ref, r1, r2, metadata, outdir):
+    subprocess.run(["tandem", "-r", ref, "-i", r1, "-I", r2, "-pop", "-m", metadata,
+                    "-o", outdir], check=True, capture_output=True)
+    with open(os.path.join(outdir, "junction_quantification.tsv")) as f:
+        lines = [line for line in f if not line.startswith("#")]
+    return list(csv.DictReader(lines, delimiter="\t"))
+
+
+def table_text(outdir):
+    """The summary table of the HTML report, tags stripped."""
+    import re
+    with open(os.path.join(outdir, "tandem_report.html")) as f:
+        html = f.read()
+    body = html.split("<tbody>", 1)[1].split("</tbody>", 1)[0] if "<tbody>" in html else ""
+    return " ".join(re.sub(r"<[^>]+>", " ", body).split())
+
+
+def near(row, seq_id, start, end, slop=5):
+    return (row["seq_id"] == seq_id
+            and abs(int(row["start"]) - start) <= slop
+            and abs(int(row["end"]) - end) <= slop)
+
+
+def main(work):
+    os.makedirs(work, exist_ok=True)
+    random.seed(5)
+    chrom = "".join(random.choice("ACGT") for _ in range(200_000))
+    plasmid = "".join(random.choice("ACGT") for _ in range(80_000))
+
+    chrom_fa = os.path.join(work, "chrom.fna")
+    plasmid_fa = os.path.join(work, "plasmid.fna")
+    both_fa = os.path.join(work, "chrom_plasmid.fna")
+    write_fasta(chrom_fa, [("chrom", chrom)])
+    write_fasta(plasmid_fa, [("plasmid", plasmid)])
+    write_fasta(both_fa, [("chrom", chrom), ("plasmid", plasmid)])
+
+    results = []
+
+    # 1. Circular chromosome: the 10 kb duplication and nothing else.
+    r1, r2 = simulate(chrom_fa, os.path.join(work, "circ"), 50000, 60000, 0.4, 11)
+    rows = run_scan(chrom_fa, r1, r2, os.path.join(work, "out_circ"))
+    ok = len(rows) == 1 and near(rows[0], "chrom", 50000, 60000)
+    dosage = rows[0]["dosage"] if rows else "-"
+    results.append(("circular chromosome, 10 kb at f=0.4", ok,
+                    f"{len(rows)} junction(s), dosage {dosage}"))
+    circ = rows
+
+    # The report shows what junctions.tsv holds, not the old module 2 fields.
+    text = table_text(os.path.join(work, "out_circ"))
+    ok = "50,000" in text and "60,000" in text and (not circ or circ[0]["junction_reads"] in text.split())
+    results.append(("isolate report lists the junction", ok, text[:60]))
+
+    # 2. Two contigs, duplication on the second one.
+    c1, c2 = simulate(chrom_fa, os.path.join(work, "wt"), 1, 2, 0.0, 12)
+    p1, p2 = simulate(plasmid_fa, os.path.join(work, "pdup"), 30000, 40000, 0.5, 13)
+    m1 = concat([c1, p1], os.path.join(work, "mix_R1.fq"))
+    m2 = concat([c2, p2], os.path.join(work, "mix_R2.fq"))
+    rows = run_scan(both_fa, m1, m2, os.path.join(work, "out_two"))
+    ok = len(rows) == 1 and near(rows[0], "plasmid", 30000, 40000)
+    dosage = rows[0]["dosage"] if rows else "-"
+    results.append(("second contig, 10 kb at f=0.5", ok,
+                    f"{len(rows)} junction(s), dosage {dosage}"))
+
+    # 3. A 3 bp duplication is an indel, not something to report.
+    s1, s2 = simulate(chrom_fa, os.path.join(work, "small"), 80000, 80002, 1.0, 14)
+    rows = run_scan(chrom_fa, s1, s2, os.path.join(work, "out_small"))
+    results.append(("3 bp duplication stays below --min-size", len(rows) == 0,
+                    f"{len(rows)} junction(s)"))
+
+    # 4. The first 80 bp of the unit also occur elsewhere, so most reads across
+    #    the junction can't be placed. The raw ratio drops well below the
+    #    truth; the corrected one should not.
+    random.seed(12)
+    base = list("".join(random.choice("ACGT") for _ in range(300_000)))
+    base[200000:200080] = base[100000:100080]
+    rep_fa = os.path.join(work, "repeat_at_start.fna")
+    write_fasta(rep_fa, [("chrom", "".join(base))])
+    # deep enough that the reads left countable (about 40%) pin the estimate
+    r1, r2 = simulate(rep_fa, os.path.join(work, "rep"), 100001, 110000, 0.5, 15,
+                      depth=600)
+    rows = [r for r in run_scan(rep_fa, r1, r2, os.path.join(work, "out_rep"))
+            if near(r, "chrom", 100001, 110000)]
+    ok = (len(rows) == 1 and float(rows[0]["dosage_raw"]) < 0.3
+          and 0.3 <= float(rows[0]["dosage"]) <= 0.7)
+    detail = (f"raw {rows[0]['dosage_raw']}, corrected {rows[0]['dosage']} "
+              f"(truth 0.5)") if rows else "not found"
+    results.append(("repeat beside the junction, f=0.5", ok, detail))
+
+    # 4b. 12 bp of microhomology: the bases after the unit repeat its first 12,
+    #     so a read's anchors on the two sides overlap across the junction and
+    #     the junction must be placed between them all the same.
+    random.seed(19)
+    base = list("".join(random.choice("ACGT") for _ in range(300_000)))
+    base[110000:110012] = base[100000:100012]
+    mh_fa = os.path.join(work, "microhomology_12.fna")
+    write_fasta(mh_fa, [("chrom", "".join(base))])
+    r1, r2 = simulate(mh_fa, os.path.join(work, "mh12"), 100001, 110000, 0.5, 20)
+    rows = [r for r in run_scan(mh_fa, r1, r2, os.path.join(work, "out_mh12"))
+            if near(r, "chrom", 100001, 110000, slop=20)]
+    ok = (len(rows) == 1 and int(rows[0]["microhomology"]) >= 12
+          and 0.3 <= float(rows[0]["dosage"]) <= 0.7)
+    detail = (f"{rows[0]['junction_reads']} reads, microhomology {rows[0]['microhomology']}, "
+              f"dosage {rows[0]['dosage']} (truth 0.5)") if rows else "not found"
+    results.append(("12 bp microhomology at the junction", ok, detail))
+
+    # 4c. Four copies of a 4 kb element, each 10 bases off the others, and no
+    #     duplication. With sequencing errors at 0.5% a read from one copy now
+    #     and then picks up an anchor on another; none of that may come out as
+    #     a junction, even at one read.
+    random.seed(23)
+    base = [random.choice("ACGT") for _ in range(500_000)]
+    element = [random.choice("ACGT") for _ in range(4000)]
+    for pos in (60_000, 170_000, 280_000, 390_000):
+        copy = list(element)
+        for i in random.sample(range(4000), 10):
+            copy[i] = random.choice([b for b in "ACGT" if b != copy[i]])
+        base[pos:pos + 4000] = copy
+    copies_fa = os.path.join(work, "near_identical_copies.fna")
+    write_fasta(copies_fa, [("chrom", "".join(base))])
+    r1, r2 = simulate(copies_fa, os.path.join(work, "copies"), 1, 2, 0.0, 24,
+                      depth=150, error=0.005)
+    rows = run_scan(copies_fa, r1, r2, os.path.join(work, "out_copies"),
+                    extra=["--min-support", "1"])
+    detail = ", ".join(f"{r['start']}-{r['end']} ({r['junction_reads']})" for r in rows[:3])
+    results.append(("near-identical copies, errors: no junction", not rows,
+                    detail or "0 junction(s)"))
+
+    # 4d. A crossover inside a 1.7 kb repeat whose two copies differ at about
+    #     1 base in 22, as in SBW25 isolates M2 and M5: the copies run alike for
+    #     longer than 30 bp around the crossover, and the bases that tell them
+    #     apart lie further out in the read. Isolate, 251 bp reads.
+    random.seed(29)
+    base = [random.choice("ACGT") for _ in range(250_000)]
+    element = [random.choice("ACGT") for _ in range(1700)]
+    other = list(element)
+    for i in range(1700):
+        if not 820 <= i < 870 and random.random() < 0.045:
+            other[i] = random.choice([b for b in "ACGT" if b != other[i]])
+    base[40_000:41_700] = element
+    base[140_000:141_700] = other
+    cross_fa = os.path.join(work, "repeat_crossover.fna")
+    write_fasta(cross_fa, [("chrom", "".join(base))])
+    r1, r2 = simulate(cross_fa, os.path.join(work, "crossover"), 40_851, 140_850, 1.0, 30,
+                      depth=50, error=0.002, read_length=251, insert=450)
+    rows = [r for r in run_scan(cross_fa, r1, r2, os.path.join(work, "out_crossover"))
+            if near(r, "chrom", 40_851, 140_850, slop=60)]
+    known = run_scan(cross_fa, r1, r2, os.path.join(work, "out_crossover_known"),
+                     extra=["-s", "40851", "-e", "140850"])
+    ok = (len(rows) == 1 and int(rows[0]["junction_reads"]) >= 5 and len(known) == 1
+          and float(known[0]["dosage_low"]) <= 1 <= float(known[0]["dosage_high"]))
+    detail = (f"scan {rows[0]['junction_reads']} reads at {rows[0]['start']}-{rows[0]['end']}"
+              if rows else "scan found nothing")
+    if known:
+        detail += (f"; known {known[0]['junction_reads']}/{known[0]['reference_reads']}, "
+                   f"dosage {known[0]['dosage']} ({known[0]['dosage_low']}-"
+                   f"{known[0]['dosage_high']}, truth 1)")
+    results.append(("crossover inside a diverged repeat", ok, detail))
+
+    # 4e. Four copies of a 2 kb element at about 95% identity to each other,
+    #     no duplication, sequencing errors at 0.5%: telling bases further out
+    #     in the read must not let an error through either.
+    random.seed(31)
+    base = [random.choice("ACGT") for _ in range(400_000)]
+    element = [random.choice("ACGT") for _ in range(2000)]
+    for pos in (50_000, 150_000, 250_000, 350_000):
+        copy = list(element)
+        for i in random.sample(range(2000), 50):
+            copy[i] = random.choice([b for b in "ACGT" if b != copy[i]])
+        base[pos:pos + 2000] = copy
+    diverged_fa = os.path.join(work, "diverged_copies.fna")
+    write_fasta(diverged_fa, [("chrom", "".join(base))])
+    r1, r2 = simulate(diverged_fa, os.path.join(work, "diverged"), 1, 2, 0.0, 32,
+                      depth=150, error=0.005)
+    rows = run_scan(diverged_fa, r1, r2, os.path.join(work, "out_diverged"),
+                    extra=["--min-support", "1"])
+    detail = ", ".join(f"{r['start']}-{r['end']} ({r['junction_reads']})" for r in rows[:3])
+    results.append(("diverged copies, errors: no junction", not rows,
+                    detail or "0 junction(s)"))
+
+    # 4f. An array of five 220 bp units, about 94% alike, gains three units.
+    #     Given Module 1's table of the reference's tandem duplications, the
+    #     scan marks the junction as a change in the array's copy number. The
+    #     10 kb duplication of test 1 lies in no array and stays unmarked.
+    random.seed(37)
+    base = [random.choice("ACGT") for _ in range(200_000)]
+    master = [random.choice("ACGT") for _ in range(220)]
+    for u in range(5):
+        unit = list(master)
+        for i in random.sample(range(220), 7):
+            unit[i] = random.choice([b for b in "ACGT" if b != unit[i]])
+        base[100_000 + 220 * u:100_000 + 220 * (u + 1)] = unit
+    array_fa = os.path.join(work, "array.fna")
+    write_fasta(array_fa, [("chrom", "".join(base))])
+    module1 = os.path.join(work, "module1_array")
+    os.makedirs(module1, exist_ok=True)
+    with open(os.path.join(module1, "tandem_duplications.tsv"), "w") as f:
+        f.write("seq_id\tcopy1_start\tcopy1_end\tcopy2_start\tcopy2_end\tsize\t"
+                "copy_number\torientation\tarchitecture\n")
+        f.write("chrom\t100001\t100220\t100221\t100440\t220\t5\tdirect\tarray\n")
+        f.write("chrom\t150001\t150500\t150501\t151000\t500\t2\tdirect\tmicrohomology\n")
+    r1, r2 = simulate(array_fa, os.path.join(work, "array"), 100_001, 100_660, 1.0, 38,
+                      depth=60)
+    hit = [r for r in run_scan(array_fa, r1, r2, os.path.join(work, "out_array"),
+                               extra=["--reference-tandems", module1])
+           if near(r, "chrom", 100_001, 100_660, slop=60)]
+    plain = run_scan(chrom_fa, os.path.join(work, "circ_R1.fq"),
+                     os.path.join(work, "circ_R2.fq"), os.path.join(work, "out_circ_tandems"),
+                     extra=["--reference-tandems",
+                            os.path.join(module1, "tandem_duplications.tsv")])
+    ok = (len(hit) == 1 and hit[0]["reference_tandem"].startswith("array 100001-101100")
+          and len(plain) == 1 and not plain[0]["reference_tandem"])
+    detail = (f"{hit[0]['start']}-{hit[0]['end']}: {hit[0]['reference_tandem'] or 'not marked'}"
+              if hit else "array junction not found")
+    detail += "; 10 kb duplication " + (
+        "unmarked" if plain and not plain[0]["reference_tandem"] else "marked")
+    results.append(("array copy-number change is marked", ok, detail))
+
+    # 5. A junction that is also in the control is marked with its support there.
+    c1, c2 = simulate(chrom_fa, os.path.join(work, "ctrl"), 50000, 60000, 0.2, 16)
+    ctrl_rows = run_scan(chrom_fa, c1, c2, os.path.join(work, "out_ctrl"),
+                         extra=["--min-support", "1"])
+    rows = run_scan(chrom_fa, os.path.join(work, "circ_R1.fq"),
+                    os.path.join(work, "circ_R2.fq"), os.path.join(work, "out_vs_ctrl"),
+                    extra=["--control-junctions",
+                           os.path.join(work, "out_ctrl", "junctions.tsv")])
+    ok = (len(ctrl_rows) >= 1 and len(rows) == 1
+          and int(rows[0]["control_reads"]) > 0)
+    detail = f"control_reads {rows[0]['control_reads']}" if rows else "not found"
+    results.append(("junction also in the control is marked", ok, detail))
+
+    # 6. Population mode at known coordinates, on the reads from case 1: the
+    #    junction as given, the same 6 bp off, and a stretch with no
+    #    duplication. The first two are one junction and must agree.
+    metadata = os.path.join(work, "known.tsv")
+    with open(metadata, "w") as f:
+        f.write("given\t50000\t60000\nshifted\t50006\t60006\nabsent\t120000\t125000\n")
+    rows = {r["name"]: r for r in run_population(
+        chrom_fa, os.path.join(work, "circ_R1.fq"), os.path.join(work, "circ_R2.fq"),
+        metadata, os.path.join(work, "out_pop"))}
+    given, shifted, absent = rows.get("given"), rows.get("shifted"), rows.get("absent")
+    ok = (given is not None and shifted is not None and absent is not None
+          and int(given["junction_reads"]) > 0
+          and 0.2 <= float(given["dosage"]) <= 0.6
+          and (shifted["dup_start"], shifted["dosage"]) == (given["dup_start"], given["dosage"])
+          and int(absent["junction_reads"]) == 0 and float(absent["dosage"]) == 0)
+    detail = (f"dosage {given['dosage']} (truth 0.4), off-by-6 {shifted['dosage']}, "
+              f"absent {absent['dosage']}") if ok or (given and shifted and absent) else "missing rows"
+    results.append(("population mode at known junctions", ok, detail))
+
+    # At a known junction a read needs an anchor on one side only, so more
+    # reads count than in the scan, which has to find the junction first.
+    ok = (given is not None and len(circ) == 1
+          and int(given["junction_reads"]) > int(circ[0]["junction_reads"])
+          and int(given["reference_reads"]) > int(circ[0]["reference_reads"]))
+    detail = (f"{given['junction_reads']}/{given['reference_reads']} reads, "
+              f"scan {circ[0]['junction_reads']}/{circ[0]['reference_reads']}"
+              if given is not None and circ else "missing rows")
+    results.append(("known junction counts more reads", ok, detail))
+
+    # 7. Isolate mode with boundaries read off a coverage plot, 150 bp out: every
+    #    start paired with every end after it, each reported once, and the
+    #    junction counted as population mode counts it.
+    out = os.path.join(work, "out_iso_given")
+    subprocess.run(["tandem", "-r", chrom_fa, "-i", os.path.join(work, "circ_R1.fq"),
+                    "-I", os.path.join(work, "circ_R2.fq"), "-iso",
+                    "-s", "49850", "120000", "-e", "60150", "125000", "-o", out],
+                   check=True, capture_output=True)
+    with open(os.path.join(out, "junctions.tsv")) as f:
+        rows = {(int(r["provided_start"]), int(r["provided_end"])): r
+                for r in csv.DictReader(f, delimiter="\t")}
+    hit = rows.get((49850, 60150))
+    others = [r for key, r in rows.items() if key != (49850, 60150)]
+    ok = (hit is not None and near(hit, "chrom", 50000, 60000)
+          and given is not None and hit["junction_reads"] == given["junction_reads"]
+          and len(others) == 2 and all(int(r["junction_reads"]) == 0 for r in others))
+    detail = (f"{hit['start']}-{hit['end']}, {hit['junction_reads']} reads; "
+              f"{len(others)} other pair(s) without reads") if hit else f"{len(rows)} row(s)"
+    results.append(("isolate mode with -s/-e, 150 bp out", ok, detail))
+
+    # 8. The first 400 bp of the unit also occur elsewhere, longer than a read.
+    #    No read across the junction has unique sequence on both sides, so the
+    #    scan cannot find it; at the known junction, reads anchored on the
+    #    unit's end are called by the bases they carry past it.
+    random.seed(13)
+    base = list("".join(random.choice("ACGT") for _ in range(300_000)))
+    base[200000:200400] = base[100000:100400]
+    one_fa = os.path.join(work, "repeat_400_at_start.fna")
+    write_fasta(one_fa, [("chrom", "".join(base))])
+    h1, h2 = simulate(one_fa, os.path.join(work, "one_side"), 100001, 110000, 0.5, 17)
+    metadata = os.path.join(work, "one_side.tsv")
+    with open(metadata, "w") as f:
+        f.write("one_side\t100001\t110000\nstart_10_out\t100011\t110000\n")
+    rows = run_population(one_fa, h1, h2, metadata, os.path.join(work, "out_one_side"))
+    found = [r for r in run_scan(one_fa, h1, h2, os.path.join(work, "out_one_side_scan"))
+             if near(r, "chrom", 100001, 110000)]
+    r = rows[0] if rows else None
+    ok = (r is not None and not found and r["dosage_from"] == "junction"
+          and int(r["junction_reads"]) > 0 and 0.35 <= float(r["dosage"]) <= 0.65)
+    detail = (f"scan found {len(found)}; known: {r['junction_reads']} reads, dosage "
+              f"{r['dosage']} from {r['dosage_from']} (truth 0.5)") if r else "no row"
+    results.append(("repeat at one end: counted from the other", ok, detail))
+
+    # With no read placed on both sides there is no vote to correct a start
+    # given 10 bp out; the reads placed on the unit's end still find it.
+    off = rows[1] if len(rows) > 1 else None
+    ok = (r is not None and off is not None
+          and (off["dup_start"], off["dup_end"], off["dosage"])
+          == (r["dup_start"], r["dup_end"], r["dosage"]))
+    detail = (f"{off['dup_start']}-{off['dup_end']}, dosage {off['dosage']}"
+              if off is not None else "no row")
+    results.append(("repeat at one end, start 10 bp out", ok, detail))
+
+    # 8b. Both ends of the unit also occur elsewhere: no read across the
+    #     junction can be placed from either side, so the dosage comes from
+    #     depth.
+    base[210000:210400] = base[109600:110000]
+    hidden_fa = os.path.join(work, "repeat_400_both_ends.fna")
+    write_fasta(hidden_fa, [("chrom", "".join(base))])
+    h1, h2 = simulate(hidden_fa, os.path.join(work, "hidden"), 100001, 110000, 0.5, 18)
+    metadata = os.path.join(work, "hidden.tsv")
+    with open(metadata, "w") as f:
+        f.write("hidden\t100001\t110000\n")
+    rows = run_population(hidden_fa, h1, h2, metadata, os.path.join(work, "out_hidden"))
+    r = rows[0] if rows else None
+    ok = (r is not None and int(r["junction_reads"]) == 0 and float(r["junction_visible"]) == 0
+          and r["dosage_from"] == "depth" and 0.35 <= float(r["dosage"]) <= 0.65)
+    detail = (f"junction visible {r['junction_visible']}, dosage {r['dosage']} from "
+              f"{r['dosage_from']} (truth 0.5)") if r else "no row"
+    results.append(("repeats at both ends: depth instead", ok, detail))
+    hidden = r
+
+    # 9. Every estimate comes with an interval around it: from the read counts
+    #    for a junction (from 0 where no read crosses it), from the noise of
+    #    depth where the dosage comes from depth.
+    def spans(row):
+        return (row is not None and row["dosage_low"] != "" and row["dosage_high"] != ""
+                and float(row["dosage_low"]) <= float(row["dosage"]) <= float(row["dosage_high"]))
+    ok = (spans(given) and spans(absent) and float(absent["dosage_low"]) == 0
+          and float(absent["dosage_high"]) > 0 and spans(hidden)
+          and float(hidden["depth_noise"]) > 0)
+    detail = (f"{given['dosage_low']}-{given['dosage_high']} around {given['dosage']}; "
+              f"depth noise {hidden['depth_noise']}") if given and hidden else "missing rows"
+    results.append(("intervals around the estimates", ok, detail))
+
+    # 10. No duplication at all, but a 2.4 kb repeat in the right-hand flank,
+    #     where the depth baseline is taken. Few reads can be placed in it; if
+    #     its positions counted, the baseline would sink and depth would report
+    #     a duplication that isn't there.
+    random.seed(41)
+    base = list("".join(random.choice("ACGT") for _ in range(300_000)))
+    base[102950:105350] = base[200000:202400]
+    flank_fa = os.path.join(work, "flank_repeat.fna")
+    write_fasta(flank_fa, [("chrom", "".join(base))])
+    w1, w2 = simulate(flank_fa, os.path.join(work, "flank_wt"), 1, 2, 0.0, 7)
+    metadata = os.path.join(work, "flank.tsv")
+    with open(metadata, "w") as f:
+        f.write("absent\t100001\t102700\n")
+    rows = run_population(flank_fa, w1, w2, metadata, os.path.join(work, "out_flank"))
+    r = rows[0] if rows else None
+    ok = (r is not None and r["depth_noise"] != ""
+          and abs(float(r["depth_dosage"])) <= 2 * float(r["depth_noise"]))
+    detail = (f"depth {r['depth_dosage']}, noise {r['depth_noise']} (truth 0)") if r else "no row"
+    results.append(("repeat in the depth baseline", ok, detail))
+
+    # 11. A FASTQ file with one broken record (a read whose + line is missing)
+    #     must stop the run and say where, not lose the rest of the file.
+    broken = os.path.join(work, "broken_R2.fq")
+    with open(os.path.join(work, "circ_R2.fq")) as f:
+        lines = f.readlines()
+    del lines[4002]                     # the + line of read 1001
+    with open(broken, "w") as f:
+        f.writelines(lines)
+    run = subprocess.run(["tandem", "-r", chrom_fa, "-i", os.path.join(work, "circ_R1.fq"),
+                          "-I", broken, "-iso", "-o", os.path.join(work, "out_broken")],
+                         capture_output=True, text=True)
+    ok = run.returncode != 0 and "line 4003" in run.stderr
+    detail = run.stderr.strip().splitlines()[-1][:70] if run.stderr.strip() else "no error"
+    results.append(("broken FASTQ record stops the run", ok, detail))
+
+    failed = 0
+    for name, ok, detail in results:
+        print(f"  {'PASS' if ok else 'FAIL'}  {name:<42} {detail}")
+        failed += not ok
+    return 1 if failed else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1] if len(sys.argv) > 1 else "/tmp/tandem_scan_checks"))

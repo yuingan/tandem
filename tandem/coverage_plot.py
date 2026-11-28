@@ -19,22 +19,7 @@ logger = logging.getLogger("tandem")
 def run_coverage_only(ref_fasta, read1, read2=None, output_dir=".",
                       threads=1, window=200, min_fold_change=1.7,
                       merge_fold_threshold=1.3, merge_distance=3000):
-    """Run coverage-only analysis: map reads, calculate coverage, plot.
-
-    Args:
-        ref_fasta: path to reference FASTA
-        read1: path to forward reads
-        read2: path to reverse reads (optional)
-        output_dir: output directory
-        threads: number of threads
-        window: sliding window size for coverage detection
-        min_fold_change: fold change threshold to show on plot
-        merge_fold_threshold: fold change for merging adjacent regions
-        merge_distance: fixed merge distance in bp
-
-    Returns:
-        list of elevated region dicts (for summary)
-    """
+    """Run coverage-only analysis: map reads, calculate coverage, plot."""
     logger.info("=" * 60)
     logger.info("Coverage-only mode: generating coverage plot")
     logger.info("=" * 60)
